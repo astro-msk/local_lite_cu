@@ -50,12 +50,26 @@ public struct DesktopAction: Equatable, Sendable {
     public var isReadOnly: Bool { name == "observe" || name == "wait" }
 }
 
+public struct ClarificationRequest: Equatable, Sendable {
+    public let question: String
+    public let options: [String]
+
+    public init(question: String, options: [String]) {
+        self.question = question
+        self.options = options
+    }
+}
+
 public enum WorkflowNodeKind: String, Equatable, Sendable {
     case input, planning, action, observation, result
 }
 
 public enum WorkflowNodeStatus: String, Equatable, Sendable {
     case active, awaitingApproval, complete, stopped, failed
+
+    public var isTerminal: Bool {
+        self == .complete || self == .stopped || self == .failed
+    }
 }
 
 public struct WorkflowNode: Identifiable, Equatable, Sendable {
@@ -66,15 +80,30 @@ public struct WorkflowNode: Identifiable, Equatable, Sendable {
     public var notes: [String]
     public var status: WorkflowNodeStatus
     public var action: DesktopAction?
+    public var startedAt: Date?
+    public var endedAt: Date?
 
-    public init(id: UUID = UUID(), kind: WorkflowNodeKind, title: String, detail: String = "", notes: [String] = [], status: WorkflowNodeStatus = .active, action: DesktopAction? = nil) {
+    public init(id: UUID = UUID(), kind: WorkflowNodeKind, title: String, detail: String = "", notes: [String] = [], status: WorkflowNodeStatus = .active, action: DesktopAction? = nil, startedAt: Date? = nil, endedAt: Date? = nil) {
         self.id = id; self.kind = kind; self.title = title; self.detail = detail; self.notes = notes; self.status = status; self.action = action
+        self.startedAt = startedAt; self.endedAt = endedAt
+    }
+
+    /// Wall time includes waiting for approvals or answers. Older saved nodes may
+    /// have no timestamps; their duration remains unknown instead of growing.
+    public func elapsed(at date: Date = Date()) -> TimeInterval? {
+        guard let startedAt, let end = endedAt ?? (status.isTerminal ? nil : date) else { return nil }
+        return max(0, end.timeIntervalSince(startedAt))
     }
 }
 
 @MainActor public protocol DesktopDriving: AnyObject {
+    var executionInstructions: String { get }
     func snapshot() async throws -> DesktopSnapshot
     func execute(_ action: DesktopAction) async throws -> String
+}
+
+public extension DesktopDriving {
+    var executionInstructions: String { "" }
 }
 
 public enum ApprovalMode: String, CaseIterable, Identifiable, Sendable {

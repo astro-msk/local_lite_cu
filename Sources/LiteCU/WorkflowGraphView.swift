@@ -7,8 +7,11 @@ struct WorkflowGraphView: View {
     let isRunning: Bool
     let stage: String
     var isReadOnly: Bool = false
+    var pendingClarification: ClarificationRequest?
     let onApprove: () -> Void
     let onReject: () -> Void
+    var onClarify: (String) -> Void = { _ in }
+    var onCancelClarification: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +20,10 @@ struct WorkflowGraphView: View {
             } else {
                 ForEach(Array(nodes.enumerated()), id: \.element.id) { index, node in
                     WorkflowGraphRow(node: node, number: index + 1, isLast: index == nodes.count - 1,
-                                     isRunning: isRunning, isReadOnly: isReadOnly, onApprove: onApprove, onReject: onReject)
+                                     isRunning: isRunning, isReadOnly: isReadOnly,
+                                     pendingClarification: pendingClarification,
+                                     onApprove: onApprove, onReject: onReject,
+                                     onClarify: onClarify, onCancelClarification: onCancelClarification)
                         .id(node.id)
                 }
             }
@@ -31,7 +37,7 @@ struct WorkflowGraphView: View {
         VStack(spacing: 0) {
             guideRow("Input", symbol: "text.bubble", detail: "Type or dictate what you want to do.", isLast: false)
             guideRow("Plan", symbol: "point.3.connected.trianglepath.dotted", detail: "See the proposed route and how success will be checked.", isLast: false)
-            guideRow("Act", symbol: "cursorarrow", detail: "Follow each action and the desktop observation that comes next.", isLast: false)
+            guideRow("Act", symbol: "cursorarrow", detail: "Follow each action and the observation that comes next.", isLast: false)
             guideRow("Result", symbol: "checkmark", detail: "Review the outcome and the path taken.", isLast: true)
         }
         .padding(.vertical, 6)
@@ -65,8 +71,11 @@ private struct WorkflowGraphRow: View {
     let isLast: Bool
     let isRunning: Bool
     let isReadOnly: Bool
+    let pendingClarification: ClarificationRequest?
     let onApprove: () -> Void
     let onReject: () -> Void
+    let onClarify: (String) -> Void
+    let onCancelClarification: () -> Void
 
     var body: some View {
         row
@@ -87,10 +96,15 @@ private struct WorkflowGraphRow: View {
                     .background(Palette.panel, in: Circle())
                     .overlay(Circle().stroke(node.status.tint.opacity(node.status == .complete ? 0.30 : 0.65), lineWidth: 1))
                     .accessibilityLabel("Step \(number), \(node.kind.label)")
-                Text(node.kind.label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Palette.secondary)
-                    .padding(.top, 7)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(node.kind.label)
+                        .font(.system(size: 11, weight: .medium))
+                    ElapsedTimeLabel(startedAt: node.startedAt, endedAt: node.endedAt,
+                                     isRunning: isRunning && !isReadOnly && !node.status.isTerminal)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(Palette.secondary)
+                .padding(.top, 7)
             }
             .frame(width: 112, alignment: .leading)
             card
@@ -109,9 +123,12 @@ private struct WorkflowGraphRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                WorkflowStatusPill(status: node.status, isRunning: isRunning, isResult: node.kind == .result)
+                WorkflowStatusPill(status: node.status, isRunning: isRunning, isResult: node.kind == .result,
+                                   isClarification: node.status == .awaitingApproval && node.action == nil)
             }
-            if !isReadOnly, node.status == .awaitingApproval, let action = node.action {
+            if !isReadOnly, node.status == .awaitingApproval, node.action == nil, let request = pendingClarification {
+                ClarificationCard(request: request, onContinue: onClarify, onCancel: onCancelClarification)
+            } else if !isReadOnly, node.status == .awaitingApproval, let action = node.action {
                 ActionApprovalCard(action: action, onApprove: onApprove, onReject: onReject)
             } else if node.kind == .planning {
                 WorkflowPlanningDetails(detail: node.detail, notes: node.notes)
@@ -165,6 +182,46 @@ private struct WorkflowGraphRow: View {
     }
 }
 
+/// A timer exists only while work is active. Saved or finished work is static,
+/// and timestamps missing from older histories never become invented durations.
+struct ElapsedTimeLabel: View {
+    let startedAt: Date?
+    let endedAt: Date?
+    let isRunning: Bool
+    var prefix = ""
+
+    var body: some View {
+        Group {
+            if isRunning, startedAt != nil, endedAt == nil {
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    label(at: timeline.date)
+                }
+            } else {
+                label(at: endedAt)
+            }
+        }
+        .monospacedDigit()
+        .fixedSize()
+        .help("Elapsed wall time, including time waiting for approval or your answer.")
+    }
+
+    private func label(at date: Date?) -> some View {
+        let seconds: Int? = if let startedAt, let end = endedAt ?? date {
+            Int(max(0, end.timeIntervalSince(startedAt)))
+        } else { nil }
+        let duration = seconds.map(Self.format) ?? "—"
+        return Text(prefix + duration)
+            .accessibilityLabel("Elapsed time")
+            .accessibilityValue(seconds == nil ? "Not recorded" : duration)
+    }
+
+    private static func format(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3_600 { return String(format: "%dm %02ds", seconds / 60, seconds % 60) }
+        return String(format: "%dh %02dm", seconds / 3_600, (seconds % 3_600) / 60)
+    }
+}
+
 private struct WorkflowSpine: Shape {
     func path(in rect: CGRect) -> Path {
         Path { path in
@@ -179,6 +236,7 @@ private struct WorkflowStatusPill: View {
     let status: WorkflowNodeStatus
     let isRunning: Bool
     let isResult: Bool
+    let isClarification: Bool
 
     var body: some View {
         HStack(spacing: 5) {
@@ -188,7 +246,7 @@ private struct WorkflowStatusPill: View {
             } else {
                 Image(systemName: status.symbol).font(.system(size: 9, weight: .semibold)).accessibilityHidden(true)
             }
-            Text(isResult && status == .complete ? "Run finished" : status.label).font(.system(size: 10, weight: .medium))
+            Text(isClarification ? "Input needed" : (isResult && status == .complete ? "Run finished" : status.label)).font(.system(size: 10, weight: .medium))
         }
         .foregroundStyle(status.tint)
         .padding(.horizontal, 8)

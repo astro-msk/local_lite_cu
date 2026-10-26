@@ -5,6 +5,7 @@ struct SavedRun: Identifiable, Equatable, Sendable {
     var id: UUID
     var command: String
     var startedAt: Date
+    var endedAt: Date?
     var modelName: String
     var backend: String
     var demoMode: Bool
@@ -13,13 +14,15 @@ struct SavedRun: Identifiable, Equatable, Sendable {
     var nodes: [WorkflowNode]
     var stepCount: Int
     var maxSteps: Int
+    var executionTarget: String
 
     init(id: UUID = UUID(), command: String, startedAt: Date = Date(), modelName: String,
          backend: String, demoMode: Bool, stage: String, result: String = "",
-         nodes: [WorkflowNode] = [], stepCount: Int = 0, maxSteps: Int = 12) {
+         nodes: [WorkflowNode] = [], stepCount: Int = 0, maxSteps: Int = 12, executionTarget: String = "Desktop", endedAt: Date? = nil) {
         self.id = id
         self.command = command
         self.startedAt = startedAt
+        self.endedAt = endedAt
         self.modelName = modelName
         self.backend = backend
         self.demoMode = demoMode
@@ -28,6 +31,7 @@ struct SavedRun: Identifiable, Equatable, Sendable {
         self.nodes = nodes
         self.stepCount = stepCount
         self.maxSteps = maxSteps
+        self.executionTarget = executionTarget
     }
 }
 
@@ -119,6 +123,7 @@ private struct RunRecord: Codable {
     let id: UUID
     let command: String
     let startedAt: Date
+    let endedAt: Date?
     let modelName: String
     let backend: String
     let demoMode: Bool
@@ -127,11 +132,13 @@ private struct RunRecord: Codable {
     let nodes: [NodeRecord]
     let stepCount: Int
     let maxSteps: Int
+    let executionTarget: String?
 
     init(_ run: SavedRun) {
         id = run.id
         command = run.command
         startedAt = run.startedAt
+        endedAt = run.endedAt
         modelName = run.modelName
         backend = run.backend
         demoMode = run.demoMode
@@ -140,12 +147,13 @@ private struct RunRecord: Codable {
         nodes = run.nodes.map(NodeRecord.init)
         stepCount = run.stepCount
         maxSteps = run.maxSteps
+        executionTarget = run.executionTarget
     }
 
     func savedRun() throws -> SavedRun {
         SavedRun(id: id, command: command, startedAt: startedAt, modelName: modelName, backend: backend,
                  demoMode: demoMode, stage: stage, result: result, nodes: try nodes.map { try $0.node() },
-                 stepCount: stepCount, maxSteps: maxSteps)
+                 stepCount: stepCount, maxSteps: maxSteps, executionTarget: executionTarget ?? "Desktop", endedAt: endedAt)
     }
 }
 
@@ -157,6 +165,8 @@ private struct NodeRecord: Codable {
     let notes: [String]
     let status: String
     let action: ActionRecord?
+    let startedAt: Date?
+    let endedAt: Date?
 
     init(_ node: WorkflowNode) {
         id = node.id
@@ -166,6 +176,8 @@ private struct NodeRecord: Codable {
         notes = node.notes
         status = node.status.rawValue
         action = node.action.map(ActionRecord.init)
+        startedAt = node.startedAt
+        endedAt = node.endedAt
     }
 
     func node() throws -> WorkflowNode {
@@ -173,7 +185,7 @@ private struct NodeRecord: Codable {
             throw HistoryError.read("A saved workflow step has an unrecognized type or status.")
         }
         return WorkflowNode(id: id, kind: kind, title: title, detail: detail, notes: notes, status: status,
-                            action: action.map { DesktopAction(name: $0.name, arguments: $0.arguments) })
+                            action: action.map { DesktopAction(name: $0.name, arguments: $0.arguments) }, startedAt: startedAt, endedAt: endedAt)
     }
 }
 

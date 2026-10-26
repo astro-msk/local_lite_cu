@@ -2,6 +2,13 @@ import AppKit
 import Combine
 import LiteCUCore
 
+enum ExecutionTarget: String, CaseIterable, Identifiable {
+    case desktop = "Desktop"
+    case backgroundArc = "Background Arc"
+
+    var id: String { rawValue }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var command = ""
@@ -18,6 +25,10 @@ final class AppModel: ObservableObject {
     @Published var isCheckingCodex = false
     @Published var codexConnectionChecked = false
     @Published var demoMode = true
+    @Published var executionTarget: ExecutionTarget = .desktop
+    @Published var arcStatus = "Allow Automation for Arc, then enable Allow JavaScript from Apple Events in Arc."
+    @Published var isCheckingArc = false
+    @Published var arcConnectionChecked = false
     @Published var approvalMode: ApprovalMode = .everyAction
     @Published var useSubagents = true
     @Published var maxSteps = 12
@@ -25,12 +36,15 @@ final class AppModel: ObservableObject {
     @Published var keySaved = false
     @Published var isRunning = false
     @Published var isStopping = false
+    @Published var currentRunStartedAt: Date?
+    @Published var currentRunEndedAt: Date?
     @Published var stage = "Ready"
     @Published var events: [RunEvent] = []
     @Published var workflowNodes: [WorkflowNode] = []
     @Published var plan = ""
     @Published var result = ""
     @Published var pendingAction: DesktopAction?
+    @Published var pendingClarification: ClarificationRequest?
     @Published var errorMessage: String?
     @Published var keyMessage: String?
     @Published var stepCount = 0
@@ -42,10 +56,12 @@ final class AppModel: ObservableObject {
     @Published var historyError: String?
     let speech = SpeechController()
     private let desktop = MacDesktopDriver()
+    private let arc = ArcBrowserDriver()
     private var task: Task<Void, Never>?
     private var voiceStartTask: Task<Void, Never>?
     private var voiceStartID: UUID?
     private var approval: CheckedContinuation<Bool, Never>?
+    private var clarification: CheckedContinuation<String?, Never>?
     private let historyStore = RunHistoryStore()
     private var activeRunID: UUID?
     private var runStartedAt = Date()
@@ -71,9 +87,10 @@ final class AppModel: ObservableObject {
         keySaved = KeychainStore.load() != nil
         refreshPermissions()
         speech.$transcript.dropFirst().sink { [weak self] text in
-            guard let self, !self.isRunning, !text.isEmpty else { return }
+            guard let self, !self.isRunning, self.selectedRunID == nil, !text.isEmpty else { return }
             self.command = text
         }.store(in: &subscriptions)
+        speech.onFinalTranscript = { [weak self] in self?.receiveFinalTranscript($0) }
         desktop.onEmergencyStop = { [weak self] in self?.stop() }
         desktop.startEmergencyStopMonitor()
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
@@ -82,13 +99,14 @@ final class AppModel: ObservableObject {
 
     func run() {
         guard !isRunning, selectedRunID == nil else { return }
+        guard !isCheckingArc else { errorMessage = "Wait for the Arc setup check to finish, then run your task."; return }
         guard voiceStartID == nil && !speech.isStarting && !speech.isListening && !speech.isFinishing else {
             errorMessage = "Stop dictation and wait for the transcript before running your task."
             return
         }
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errorMessage = "Type a command or use the microphone."; return }
         refreshPermissions()
-        if !demoMode && (!accessibilityGranted || !screenRecordingGranted) {
+        if !demoMode && executionTarget == .desktop && (!accessibilityGranted || !screenRecordingGranted) {
             errorMessage = "Live desktop control needs Accessibility and Screen Recording. Enable them in Settings, then try again."
             showSettings = true; return
         }
@@ -102,11 +120,16 @@ final class AppModel: ObservableObject {
             guard !config.apiKey.isEmpty else { errorMessage = "Add an API key in Settings or choose Codex."; showSettings = true; return }
             client = OpenAIClient(model: modelName, apiKey: config.apiKey)
         }
-        let driver: any DesktopDriving = config.demo ? DemoDesktopDriver() : desktop
+        let target = executionTarget
+        let driver: any DesktopDriving
+        if config.demo { driver = DemoDesktopDriver() }
+        else if target == .backgroundArc { driver = arc }
+        else { driver = desktop }
         let runner = AgentRunner(driver: driver, client: client, configuration: config)
         activeRunID = UUID(); runStartedAt = Date()
+        currentRunStartedAt = runStartedAt; currentRunEndedAt = nil
         events = [RunEvent("user", command)]
-        plan = ""; result = ""; errorMessage = nil; pendingAction = nil; stepCount = 0; workflowNodes = []
+        plan = ""; result = ""; errorMessage = nil; pendingAction = nil; pendingClarification = nil; stepCount = 0; workflowNodes = []
         isRunning = true; isStopping = false; stage = "Planning"
         runner.onEvent = { [weak self] in self?.events.append($0) }
         runner.onWorkflow = { [weak self] in self?.workflowNodes = $0 }
@@ -125,19 +148,38 @@ final class AppModel: ObservableObject {
                 NSApp.activate(ignoringOtherApps: true)
             }
         }
+        runner.clarify = { [weak self] request in
+            guard let self, !Task.isCancelled, !self.isStopping else { return nil }
+            return await withCheckedContinuation { continuation in
+                self.pendingClarification = request
+                self.clarification = continuation
+                NSApp.unhide(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
         let submittedCommand = command
         task = Task { [weak self] in
             guard let self else { return }
             defer {
-                self.isRunning = false; self.isStopping = false; self.pendingAction = nil; self.task = nil
+                self.isRunning = false; self.isStopping = false; self.pendingAction = nil; self.pendingClarification = nil; self.task = nil
+                self.approval?.resume(returning: false); self.approval = nil
+                self.clarification?.resume(returning: nil); self.clarification = nil
+                self.currentRunEndedAt = Date()
                 self.saveCurrentRun()
                 self.activeRunID = nil
-                NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
+                if config.demo || target == .desktop {
+                    NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
+                }
             }
             do {
                 if !config.demo {
-                    NSApp.hide(nil)
-                    try await Task.sleep(for: .milliseconds(650))
+                    if target == .backgroundArc {
+                        self.arc.prepareForRun()
+                    } else {
+                        self.desktop.prepareForRun()
+                        NSApp.hide(nil)
+                        try await Task.sleep(for: .milliseconds(650))
+                    }
                 }
                 let completedResult = try await runner.run(command: submittedCommand)
                 try Task.checkCancellation()
@@ -164,15 +206,18 @@ final class AppModel: ObservableObject {
     func newChat() {
         guard canStartNewChat else { return }
         selectedRunID = nil
+        currentRunStartedAt = nil; currentRunEndedAt = nil
         command = ""; workflowNodes = []; events = []; plan = ""; result = ""
-        errorMessage = nil; pendingAction = nil; stepCount = 0; stage = "Ready"
+        errorMessage = nil; pendingAction = nil; pendingClarification = nil; stepCount = 0; stage = "Ready"
     }
 
     func openRun(_ run: SavedRun) {
         guard canStartNewChat else { return }
         selectedRunID = run.id
+        currentRunStartedAt = run.startedAt; currentRunEndedAt = run.endedAt
         command = run.command; workflowNodes = run.nodes; result = run.result
         stage = run.stage; stepCount = run.stepCount; errorMessage = nil
+        pendingAction = nil; pendingClarification = nil
         events = []; plan = run.nodes.first(where: { $0.kind == .planning })?.detail ?? ""
     }
 
@@ -181,7 +226,7 @@ final class AppModel: ObservableObject {
         let run = SavedRun(id: id, command: command, startedAt: runStartedAt,
                            modelName: modelName, backend: backend, demoMode: demoMode,
                            stage: stage, result: result, nodes: workflowNodes,
-                           stepCount: stepCount, maxSteps: maxSteps)
+                           stepCount: stepCount, maxSteps: maxSteps, executionTarget: executionTarget.rawValue, endedAt: currentRunEndedAt)
         savedRuns.removeAll { $0.id == id }
         savedRuns.insert(run, at: 0)
         savedRuns = Array(savedRuns.prefix(100))
@@ -197,15 +242,37 @@ final class AppModel: ObservableObject {
         task?.cancel()
         let continuation = approval; approval = nil; pendingAction = nil
         continuation?.resume(returning: false)
+        let answerContinuation = clarification; clarification = nil; pendingClarification = nil
+        answerContinuation?.resume(returning: nil)
     }
     func approve() {
         guard let continuation = approval else { return }
         approval = nil; pendingAction = nil
-        NSApp.hide(nil)
-        // The driver restores the app from the observation before sending input.
+        // Keep Lite CU foreground until the driver restores the exact observed app.
+        // Hiding here first could activate an unrelated app and invalidate the target.
         continuation.resume(returning: true)
     }
     func reject() { stop() }
+    private func receiveFinalTranscript(_ transcript: String) {
+        guard canStartNewChat, selectedRunID == nil else { return }
+        let parsed = VoiceCommandParser.parse(transcript)
+        command = parsed.command
+        guard parsed.hasExecutionTrigger else { return }
+        guard parsed.shouldExecute else {
+            errorMessage = "Say a task before “CU start”, or type the task here."
+            return
+        }
+        run()
+    }
+    func answerClarification(_ answer: String) {
+        let answer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isStopping, !answer.isEmpty, answer.count <= 2_000,
+              let continuation = clarification else { return }
+        clarification = nil; pendingClarification = nil
+        // The next snapshot restores the exact observed desktop app itself.
+        // Arc observes its owned tab without changing the foreground application.
+        continuation.resume(returning: answer)
+    }
     func toggleVoice() {
         guard !isRunning && selectedRunID == nil && voiceStartID == nil && !speech.isStarting && !speech.isFinishing else { return }
         if speech.isListening { speech.stop() }
@@ -245,6 +312,18 @@ final class AppModel: ObservableObject {
     }
     func requestAccessibility() { MacDesktopDriver.requestAccessibilityPermission(); refreshPermissions() }
     func requestScreenRecording() { _ = MacDesktopDriver.requestScreenRecordingPermission(); refreshPermissions() }
+    func checkArcConnection() {
+        guard !isRunning, !isCheckingArc else { return }
+        isCheckingArc = true; arcConnectionChecked = false
+        arcStatus = "Checking Arc Automation…"
+        Task {
+            defer { isCheckingArc = false }
+            do {
+                arcStatus = try await arc.checkConnection()
+                arcConnectionChecked = true
+            } catch { arcStatus = error.localizedDescription }
+        }
+    }
     func checkCodex() {
         guard !isCheckingCodex else { return }
         isCheckingCodex = true

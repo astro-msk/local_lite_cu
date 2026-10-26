@@ -1,42 +1,40 @@
 import AVFoundation
 import Combine
 import Foundation
-import Speech
 
 @MainActor
 final class SpeechController: ObservableObject {
+    /// Fired once per successful capture, after all busy flags are cleared.
+    var onFinalTranscript: ((String) -> Void)?
     @Published var transcript = ""
     @Published private(set) var isStarting = false
     @Published private(set) var isListening = false
     @Published private(set) var isFinishing = false
     @Published private(set) var error: String?
-    @Published private(set) var recognitionMode = "On-device speech preferred"
+    @Published private(set) var recognitionMode = "Whisper small.en · on this Mac · English"
     @Published private(set) var audioLevel: Double = 0
     @Published private(set) var audioStatus = "Microphone idle"
     @Published private(set) var receivedAudioBuffers = 0
 
     private let audioEngine = AVAudioEngine()
-    private var recognizer: SFSpeechRecognizer?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
     private var sessionID: UUID?
     private var hasTap = false
-    private var hasEndedAudio = false
     private var audioProbe = AudioProbe()
+    private var recording: WhisperRecording?
+    private var captureDirectory: URL?
+    private var configuration: LocalWhisperTranscriber.Configuration?
     private var captureStartedAt: TimeInterval = 0
     private var meterTask: Task<Void, Never>?
     private var finishingTask: Task<Void, Never>?
     private var configurationObserver: NSObjectProtocol?
-    private var languageName = "the selected language"
 
     init() {
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: audioEngine, queue: nil
         ) { [weak self] _ in
-            // AudioEngine posts on its internal queue. Teardown must happen elsewhere.
             Task { @MainActor [weak self] in
                 guard let self, self.isListening, !self.audioEngine.isRunning else { return }
-                self.fail("The microphone or audio format changed while recording. Check System Settings → Sound → Input, then start dictation again. Your partial transcript is kept.")
+                self.fail("The microphone changed while recording. Check System Settings → Sound → Input, then dictate again.")
             }
         }
     }
@@ -45,120 +43,123 @@ final class SpeechController: ObservableObject {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
         meterTask?.cancel()
         finishingTask?.cancel()
-        recognitionTask?.cancel()
         audioEngine.stop()
         if hasTap { audioEngine.inputNode.removeTap(onBus: 0) }
+        recording?.close()
+        if let captureDirectory { try? FileManager.default.removeItem(at: captureDirectory) }
     }
 
     func start() async {
-        guard !isStarting, !isListening else { return }
+        guard !isStarting, !isListening, !isFinishing else { return }
         abort()
         let session = UUID()
         sessionID = session
         isStarting = true
         error = nil
-        transcript = ""
         audioLevel = 0
         receivedAudioBuffers = 0
         audioProbe = AudioProbe()
-        audioStatus = "Preparing microphone…"
-        let status = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-        }
-        guard sessionID == session else { return }
-        guard status == .authorized else {
-            fail("Allow Speech Recognition for LiteCU in System Settings → Privacy & Security, or type your command.")
-            return
-        }
+        audioStatus = "Preparing local Whisper…"
+        do { configuration = try LocalWhisperTranscriber.Configuration.installed() }
+        catch { fail(error.localizedDescription); return }
         let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
         guard sessionID == session else { return }
+        if Task.isCancelled { abort(); return }
         guard microphoneAllowed else {
-            fail("Allow Microphone for LiteCU in System Settings → Privacy & Security, or type your command.")
+            fail("Allow Microphone for Lite CU in System Settings → Privacy & Security, or type your command.")
             return
         }
-        guard let recognizer = SFSpeechRecognizer(locale: .current), recognizer.isAvailable else {
-            fail("Apple speech recognition is unavailable for the current language. Check Dictation in System Settings → Keyboard, then retry or type your command.")
-            return
-        }
-        self.recognizer = recognizer
-        languageName = Locale.current.localizedString(forIdentifier: recognizer.locale.identifier) ?? recognizer.locale.identifier
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
-        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
-        recognitionMode = recognizer.supportsOnDeviceRecognition
-            ? "On-device speech · \(languageName)"
-            : "Apple network speech · \(languageName) — audio may be sent to Apple"
-        self.request = request
-        hasEndedAudio = false
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            fail("No microphone input is available. Select a microphone in System Settings → Sound → Input, or type your command.")
+            fail("No microphone input is available. Select a microphone in System Settings → Sound → Input.")
             return
         }
-        let probe = audioProbe
-        input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
-            probe.record(buffer)
-        }
-        hasTap = true
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, recognitionError in
-            let text = result?.bestTranscription.formattedString
-            let finished = result?.isFinal ?? false
-            let errorDetail = recognitionError.map {
-                let underlying = $0 as NSError
-                return "\(underlying.localizedDescription) (\(underlying.domain) \(underlying.code))"
-            }
-            Task { @MainActor [weak self] in
-                guard let self, self.sessionID == session else { return }
-                if let text, !text.isEmpty { self.transcript = text }
-                if let errorDetail {
-                    let guidance = self.transcript.isEmpty ? self.emptyTranscriptGuidance() : "Your partial transcript is kept; edit it or try dictation again."
-                    self.fail("Apple speech recognition: \(errorDetail). \(guidance)")
-                } else if finished {
-                    let emptyMessage = self.transcript.isEmpty ? self.emptyTranscriptGuidance() : nil
-                    self.tearDown(cancelRecognition: false)
-                    self.error = emptyMessage
-                    self.audioStatus = emptyMessage == nil ? "Transcript ready" : "No speech recognized"
-                }
-            }
-        }
         do {
+            let directory = try LocalWhisperTranscriber.makeSessionDirectory()
+            captureDirectory = directory
+            let writer = try WhisperRecording(url: directory.appendingPathComponent("recording.caf"), format: format)
+            recording = writer
+            let probe = audioProbe
+            input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+                writer.append(buffer)
+                probe.record(buffer)
+            }
+            hasTap = true
             audioEngine.prepare()
             try audioEngine.start()
+            transcript = ""
             captureStartedAt = ProcessInfo.processInfo.systemUptime
             isStarting = false
             isListening = true
-            audioStatus = "Waiting for microphone audio…"
+            audioStatus = "Recording on your Mac; pause or click Stop to transcribe"
             startMeter(for: session)
         } catch {
-            fail("Could not start the microphone: \(error.localizedDescription). Check System Settings → Sound → Input, then retry.")
+            fail("Could not record microphone audio: \(error.localizedDescription)")
         }
     }
 
-    /// Ends microphone capture, then accepts the final result before releasing the recognition task.
-    /// The transcript remains editable and is never submitted automatically.
+    /// Finishes capture immediately, then transcribes the saved audio offline.
+    /// AppModel decides whether the final transcript contains the user's execution phrase.
     func stop() {
-        guard let session = sessionID else { return }
-        guard !isFinishing else { return }
-        guard recognitionTask != nil, !isStarting else { abort(); return }
+        guard let session = sessionID, !isFinishing else { return }
+        guard isListening, let writer = recording, let directory = captureDirectory,
+              let configuration else { abort(); return }
         refreshAudioMetrics()
         stopCapture()
+        writer.close()
+        if let message = writer.failure { fail("Could not save microphone audio: \(message)"); return }
+        let metrics = audioProbe.snapshot()
+        guard metrics.buffers > 0, !metrics.canMeasureLevel || metrics.detectedSound else {
+            fail(emptyTranscriptGuidance())
+            return
+        }
+        // The finishing task now owns the files, including cleanup after cancellation.
+        captureDirectory = nil
+        recording = nil
         isFinishing = true
-        audioStatus = "Microphone stopped; finishing transcription…"
-        endAudio()
-        finishingTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(5)) } catch { return }
-            guard let self, self.sessionID == session, self.isFinishing else { return }
-            let guidance = self.transcript.isEmpty ? self.emptyTranscriptGuidance() : "Apple Speech did not finish in time. Your partial transcript is kept; review it before running."
-            self.fail(guidance)
+        audioStatus = "Transcribing on your Mac with Whisper…"
+        finishingTask = Task { [weak self] in
+            defer { try? FileManager.default.removeItem(at: directory) }
+            do {
+                let text = try await LocalWhisperTranscriber().transcribe(recording: writer.url, configuration: configuration)
+                try Task.checkCancellation()
+                guard let self, self.sessionID == session else { return }
+                self.finishingTask = nil
+                self.sessionID = nil
+                self.isFinishing = false
+                self.configuration = nil
+                if text.isEmpty {
+                    self.error = "Whisper did not recognize speech. Try again with a clearer, shorter command."
+                    self.audioStatus = "No speech recognized"
+                } else {
+                    self.transcript = text
+                    self.error = nil
+                    self.audioStatus = "Transcript ready to review"
+                    self.onFinalTranscript?(text)
+                }
+            } catch is CancellationError {
+                // abort() has already reset UI state. A cancelled session cannot publish text.
+            } catch {
+                guard let self, self.sessionID == session else { return }
+                self.finishingTask = nil
+                self.fail(error.localizedDescription)
+            }
         }
     }
 
-    /// Cancels immediately for emergency stop, app termination, or abandoning a voice session.
     func abort() {
-        tearDown(cancelRecognition: true)
+        sessionID = nil
+        finishingTask?.cancel()
+        finishingTask = nil
+        stopCapture()
+        recording?.close()
+        recording = nil
+        if let captureDirectory { try? FileManager.default.removeItem(at: captureDirectory) }
+        captureDirectory = nil
+        configuration = nil
+        isStarting = false
+        isFinishing = false
         audioStatus = transcript.isEmpty ? "Microphone idle" : "Transcript kept"
     }
 
@@ -166,39 +167,16 @@ final class SpeechController: ObservableObject {
         meterTask?.cancel()
         meterTask = nil
         if audioEngine.isRunning { audioEngine.stop() }
-        if hasTap {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            hasTap = false
-        }
+        if hasTap { audioEngine.inputNode.removeTap(onBus: 0); hasTap = false }
         isListening = false
         audioLevel = 0
     }
 
-    private func endAudio() {
-        guard !hasEndedAudio else { return }
-        hasEndedAudio = true
-        request?.endAudio()
-    }
-
-    private func tearDown(cancelRecognition: Bool) {
-        sessionID = nil
-        finishingTask?.cancel()
-        finishingTask = nil
-        stopCapture()
-        endAudio()
-        if cancelRecognition { recognitionTask?.cancel() }
-        recognitionTask = nil
-        request = nil
-        recognizer = nil
-        isStarting = false
-        isFinishing = false
-    }
-
     private func fail(_ message: String) {
         refreshAudioMetrics()
-        tearDown(cancelRecognition: true)
+        abort()
         error = message
-        audioStatus = transcript.isEmpty ? "Dictation stopped" : "Partial transcript kept"
+        audioStatus = "Dictation stopped"
     }
 
     private func startMeter(for session: UUID) {
@@ -209,27 +187,29 @@ final class SpeechController: ObservableObject {
                 self.refreshAudioMetrics()
                 let metrics = self.audioProbe.snapshot()
                 let elapsed = ProcessInfo.processInfo.systemUptime - self.captureStartedAt
+                if let message = self.recording?.failure {
+                    self.fail("Could not save microphone audio: \(message)")
+                    return
+                }
                 if !self.audioEngine.isRunning {
-                    self.fail("The microphone stopped unexpectedly. Check System Settings → Sound → Input, then start dictation again. Your partial transcript is kept.")
+                    self.fail("The microphone stopped. Check System Settings → Sound → Input, then dictate again.")
+                    return
+                }
+                if elapsed >= 60 || (elapsed >= 1 && metrics.soundDuration >= 0.3
+                                    && ProcessInfo.processInfo.systemUptime - metrics.lastSoundAt >= 2) {
+                    self.stop()
                     return
                 }
                 if metrics.buffers == 0 {
                     self.audioStatus = "Waiting for microphone audio…"
-                    if elapsed >= 5 {
-                        self.fail(self.emptyTranscriptGuidance())
-                        return
-                    }
+                    if elapsed >= 5 { self.fail(self.emptyTranscriptGuidance()); return }
                 } else if ProcessInfo.processInfo.systemUptime - metrics.lastBufferAt > 3 {
-                    self.fail("Microphone audio stopped arriving. Check the selected input in System Settings → Sound → Input, then retry. Your partial transcript is kept.")
+                    self.fail("Microphone audio stopped arriving. Check System Settings → Sound → Input, then retry.")
                     return
-                } else if elapsed >= 8, self.transcript.isEmpty, metrics.detectedSound {
-                    self.audioStatus = "Audio received; waiting for Apple speech recognition…"
-                } else if !metrics.canMeasureLevel {
-                    self.audioStatus = "Microphone audio received"
-                } else if metrics.level > 0.12 {
-                    self.audioStatus = "Microphone input detected"
+                } else if !metrics.canMeasureLevel || metrics.level > 0.12 {
+                    self.audioStatus = "Recording on your Mac; pause or click Stop to transcribe"
                 } else {
-                    self.audioStatus = "Microphone connected; input is quiet"
+                    self.audioStatus = "Recording; microphone input is quiet"
                 }
             }
         }
@@ -242,14 +222,41 @@ final class SpeechController: ObservableObject {
     }
 
     private func emptyTranscriptGuidance() -> String {
-        let metrics = audioProbe.snapshot()
-        if metrics.buffers == 0 {
-            return "No microphone audio arrived. Select your microphone in System Settings → Sound → Input and check its input level, then retry or type your command."
+        if audioProbe.snapshot().buffers == 0 {
+            return "No microphone audio arrived. Select your microphone in System Settings → Sound → Input, then retry."
         }
-        if metrics.canMeasureLevel, !metrics.detectedSound {
-            return "The microphone input stayed quiet. Check the selected microphone and input volume in System Settings → Sound → Input, then retry or type your command."
-        }
-        return "Audio reached the app, but Apple Speech returned no transcript. Check that Dictation is enabled for \(languageName) in System Settings → Keyboard, then retry or type your command."
+        return "The recording was quiet. Check the microphone and input volume in System Settings → Sound → Input, then retry."
+    }
+}
+
+/// The engine callback and Stop can race; closing under the same lock prevents
+/// writes after capture has ended. The containing directory is private (0700).
+private final class WhisperRecording: @unchecked Sendable {
+    let url: URL
+    private let lock = NSLock()
+    private var file: AVAudioFile?
+    private var writeError: String?
+    init(url: URL, format: AVAudioFormat) throws {
+        self.url = url
+        file = try AVAudioFile(forWriting: url, settings: format.settings,
+                               commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let file, writeError == nil else { return }
+        do { try file.write(from: buffer) } catch { writeError = error.localizedDescription }
+    }
+    var failure: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return writeError
+    }
+    func close() {
+        lock.lock()
+        file = nil
+        lock.unlock()
     }
 }
 
@@ -262,6 +269,8 @@ private final class AudioProbe: @unchecked Sendable {
         var lastBufferAt: TimeInterval = 0
         var detectedSound = false
         var canMeasureLevel = false
+        var lastSoundAt: TimeInterval = 0
+        var soundDuration: TimeInterval = 0
     }
     private let lock = NSLock()
     private var metrics = Metrics()
@@ -294,6 +303,10 @@ private final class AudioProbe: @unchecked Sendable {
             let decibels = 20 * log10(max(rms, 0.000_001))
             metrics.level = max(0, min(1, (decibels + 60) / 60))
             metrics.detectedSound = metrics.detectedSound || decibels > -48
+            if decibels > -48 {
+                metrics.lastSoundAt = now
+                metrics.soundDuration += Double(frameCount) / buffer.format.sampleRate
+            }
         }
         lock.unlock()
     }

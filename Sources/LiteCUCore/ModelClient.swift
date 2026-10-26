@@ -14,7 +14,7 @@ public struct OpenAIClient: ModelClient {
             throw LiteCUError.message("Add an OpenAI API key in Settings, or choose Codex.")
         }
         var content: [JSONValue] = [.object(["type": .string("input_text"), "text": .string(prompt)])]
-        if let snapshot {
+        if let snapshot, !snapshot.imageDataURL.isEmpty {
             content.append(.object(["type": .string("input_image"), "image_url": .string(snapshot.imageDataURL), "detail": .string("high")]))
         }
         var body: [String: JSONValue] = [

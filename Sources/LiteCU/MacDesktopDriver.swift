@@ -71,19 +71,40 @@ final class MacDesktopDriver: DesktopDriving {
             && event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains([.command, .shift])
     }
 
+    func prepareForRun() {
+        captureGeometry = nil
+        observedApplicationPID = nil
+        observedWindow = nil
+    }
+
     func snapshot() async throws -> DesktopSnapshot {
         try Task.checkCancellation()
+        let previousTargetPID = observedApplicationPID
         captureGeometry = nil
         observedApplicationPID = nil
         observedWindow = nil
         guard Self.hasScreenRecordingPermission else {
             throw LiteCUError.message("Allow Screen Recording for LiteCU in System Settings → Privacy & Security, then reopen the app if macOS requests it.")
         }
+        // Opening Lite CU to inspect progress is expected. Hand focus back before
+        // taking a fresh observation; never reuse old coordinates for this handoff.
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            NSApp.hide(nil)
+            if let pid = previousTargetPID, let target = NSRunningApplication(processIdentifier: pid), !target.isTerminated {
+                _ = target.activate(options: [])
+            }
+            for _ in 0..<20 {
+                try Task.checkCancellation()
+                if let front = NSWorkspace.shared.frontmostApplication,
+                   front.processIdentifier != ProcessInfo.processInfo.processIdentifier { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
         guard let application = NSWorkspace.shared.frontmostApplication else {
             throw LiteCUError.message("No foreground app is available. Bring the target app forward and try again.")
         }
         guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            throw LiteCUError.message("Hide LiteCU and bring the target app forward before observing the desktop.")
+            throw LiteCUError.message("Could not return to the target app. Open the app you want to control, then retry this task.")
         }
         let window = try focusedWindow(application)
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)

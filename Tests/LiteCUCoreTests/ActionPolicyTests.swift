@@ -69,6 +69,57 @@ struct ActionPolicyTests {
         }
     }
 
+    @Test
+    func testClarificationIsValidatedAndNeverBecomesDesktopAction() throws {
+        let json = try JSONValue.object([
+            "action": .string("clarify"), "reason": .string("A choice is missing"), "result": .string(""), "requires_confirmation": .bool(false),
+            "arguments": .object(["question": .string(" Which account? "), "options": .array([.string(" Personal "), .string("Work")])])
+        ]).encodedString()
+        let decision = try DecidedStep.parse(json)
+        #expect(decision.action == nil)
+        #expect(decision.result.isEmpty)
+        #expect(decision.clarification == ClarificationRequest(question: "Which account?", options: ["Personal", "Work"]))
+        #expect(throws: (any Error).self) { try ActionPolicy.validate(action("clarify", ["question": .string("Which?"), "options": .array([.string("A"), .string("B")])])) }
+    }
+
+    @Test
+    func testClarificationRejectsInvalidQuestionAndOptions() {
+        let validOptions: JSONValue = .array([.string("One"), .string("Two")])
+        let invalid: [[String: JSONValue]] = [
+            [:], ["question": .null, "options": validOptions],
+            ["question": .string(" \n "), "options": validOptions],
+            ["question": .string(String(repeating: "q", count: 501)), "options": validOptions],
+            ["question": .string("Which?"), "options": .string("One, Two")],
+            ["question": .string("Which?"), "options": .array([.string("One")])],
+            ["question": .string("Which?"), "options": .array((1...5).map { .string("Option \($0)") })],
+            ["question": .string("Which?"), "options": .array([.string(" "), .string("Two")])],
+            ["question": .string("Which?"), "options": .array([.number(1), .string("Two")])],
+            ["question": .string("Which?"), "options": .array([.string("One"), .string(" one ")])],
+            ["question": .string("Which?"), "options": .array([.string(String(repeating: "o", count: 121)), .string("Two")])]
+        ]
+        for arguments in invalid {
+            #expect(throws: (any Error).self) { try ActionPolicy.clarification(from: arguments) }
+        }
+    }
+
+    @Test
+    func testBrowserActionsRequireBoundedElementIDsAndValidScroll() {
+        for name in ["browser_click", "browser_type"] {
+            for id in ["", String(repeating: "x", count: 101)] {
+                #expect(throws: (any Error).self) { try ActionPolicy.validate(action(name, ["element_id": .string(id), "text": .string("hello")])) }
+            }
+        }
+        #expect(throws: (any Error).self) { try ActionPolicy.validate(action("browser_type", ["element_id": .string("token:1")])) }
+        #expect(throws: (any Error).self) { try ActionPolicy.validate(action("browser_type", ["element_id": .string("token:1"), "text": .string(String(repeating: "x", count: 4001))])) }
+        for amount in [0.0, 1.5, 11.0] {
+            #expect(throws: (any Error).self) { try ActionPolicy.validate(action("browser_scroll", ["direction": .string("down"), "amount": .number(amount)])) }
+        }
+        #expect(throws: (any Error).self) { try ActionPolicy.validate(action("browser_scroll", ["direction": .string("diagonal"), "amount": .number(2)])) }
+        #expect(throws: Never.self) { try ActionPolicy.validate(action("browser_click", ["element_id": .string("token:1")])) }
+        #expect(throws: Never.self) { try ActionPolicy.validate(action("browser_type", ["element_id": .string("token:1"), "text": .string("hello")])) }
+        #expect(throws: Never.self) { try ActionPolicy.validate(action("browser_scroll", ["direction": .string("down"), "amount": .number(2)])) }
+    }
+
     private func action(_ name: String, _ arguments: [String: JSONValue]) -> DesktopAction {
         DesktopAction(name: name, arguments: .object(arguments))
     }

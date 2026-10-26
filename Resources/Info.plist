@@ -12,5 +12,5 @@
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Lite CU uses your microphone when you press the voice button to dictate a command.</string>
-<key>NSSpeechRecognitionUsageDescription</key><string>Lite CU transcribes your command. On-device recognition is preferred; Apple speech services may be used when unavailable.</string>
+<key>NSAppleEventsUsageDescription</key><string>Lite CU controls its dedicated Arc task tab in the background when you choose Background Arc.</string>
 </dict></plist>

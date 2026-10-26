@@ -122,10 +122,14 @@ struct ContentView: View {
                             .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                         Text(run.stage == "Complete" ? "Run finished" : run.stage)
                             .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        if run.endedAt != nil {
+                            ElapsedTimeLabel(startedAt: run.startedAt, endedAt: run.endedAt, isRunning: false, prefix: "Total ")
+                                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        }
                     }
                 }
                 if let run = selectedRun {
-                    Text("\(run.demoMode ? "Demo" : "Live") · \(run.modelName) · \(run.backend) · \(run.stepCount) / \(run.maxSteps) actions")
+                    Text("\(run.demoMode ? "Demo" : "Live") · \(run.executionTarget) · \(run.modelName) · \(run.backend) · \(run.stepCount) / \(run.maxSteps) actions")
                         .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 }
                 Text("Read only. Start a new chat to run another task.")
@@ -196,6 +200,8 @@ struct ContentView: View {
                         Text("·")
                         Text(run.demoMode ? "Demo" : "Live")
                         Text("·")
+                        Text(run.executionTarget)
+                        Text("·")
                         Text(run.modelName)
                     }
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
@@ -236,36 +242,56 @@ struct ContentView: View {
                     Text("\(model.stepCount) / \(model.maxSteps) actions")
                         .font(.system(size: 11)).monospacedDigit().foregroundStyle(Palette.secondary)
                 }
-                Spacer(minLength: 12)
-                Text("Approval").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
-                ApprovalLevelPicker(selection: $model.approvalMode)
-                    .frame(width: 228)
-                    .disabled(model.isRunning)
-                Button {
-                    guard !model.isRunning else { return }
-                    showApprovalPreview = true
-                } label: {
-                    Label("Preview", systemImage: "eye")
+                if model.currentRunStartedAt != nil {
+                    ElapsedTimeLabel(startedAt: model.currentRunStartedAt, endedAt: model.currentRunEndedAt,
+                                     isRunning: model.isRunning, prefix: "Total ")
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 }
-                .buttonStyle(SemanticButtonStyle(tone: .yellow))
-                .disabled(model.isRunning)
-                .accessibilityLabel("Preview approval")
-                .help("Test approval controls with an isolated sample. No desktop action runs.")
+                Spacer(minLength: 12)
                 if model.isRunning {
                     Button(action: model.stop) {
                         Label(model.stage == "Stopping" ? "Stopping…" : "Stop", systemImage: "stop.fill")
                     }
                     .buttonStyle(SemanticButtonStyle(tone: .red))
+                    .fixedSize()
                     .disabled(model.stage == "Stopping")
                     .keyboardShortcut(".", modifiers: .command)
+                } else {
+                    Button {
+                        guard !model.isRunning else { return }
+                        showApprovalPreview = true
+                    } label: {
+                        Label("Preview", systemImage: "eye")
+                    }
+                    .buttonStyle(SemanticButtonStyle(tone: .yellow))
+                    .fixedSize()
+                    .disabled(model.isRunning)
+                    .accessibilityLabel("Preview approval")
+                    .help("Test approval controls with an isolated sample. No desktop action runs.")
                 }
+            }
+            HStack(spacing: 12) {
+                Text("Target").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                Picker("Execution target", selection: $model.executionTarget) {
+                    ForEach(ExecutionTarget.allCases) { target in Text(target.rawValue).tag(target) }
+                }
+                .labelsHidden()
+                .accessibilityLabel("Execution target")
+                .frame(width: 155)
+                .disabled(model.isRunning || model.isCheckingArc)
+                Text("Approval").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                    .padding(.leading, 8)
+                ApprovalLevelPicker(selection: $model.approvalMode)
+                    .frame(width: 228)
+                    .disabled(model.isRunning)
+                Spacer(minLength: 0)
             }
             HStack(spacing: 12) {
                 Text(model.approvalMode.explanation)
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 Spacer(minLength: 12)
                 if model.isRunning {
-                    Text("Emergency stop  ⌘ ⇧ Esc")
+                    Text(model.executionTarget == .desktop ? "Emergency stop  ⌘ ⇧ Esc" : "Stop task  ⌘ .")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(Palette.secondary)
                         .fixedSize()
@@ -286,7 +312,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var liveReadiness: some View {
-        if !model.accessibilityGranted || !model.screenRecordingGranted {
+        if model.executionTarget == .desktop && (!model.accessibilityGranted || !model.screenRecordingGranted) {
             Button("Set up desktop access") { model.showSettings = true }
                 .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
                 .foregroundStyle(Palette.blue).fixedSize()
@@ -301,6 +327,10 @@ struct ContentView: View {
                     .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
                     .foregroundStyle(Palette.blue).fixedSize()
             }
+        } else if model.executionTarget == .backgroundArc {
+            Button(model.arcConnectionChecked ? "Arc setup" : "Set up Arc") { model.showSettings = true }
+                .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
+                .foregroundStyle(Palette.blue).fixedSize()
         } else {
             Label("Desktop & connection ready", systemImage: "checkmark.circle.fill")
                 .font(.system(size: 10)).foregroundStyle(Palette.accent).fixedSize()
@@ -335,7 +365,9 @@ struct ContentView: View {
                             }
                         }
                         WorkflowGraphView(nodes: model.workflowNodes, isRunning: model.isRunning, stage: model.stage, isReadOnly: isPreviousRun,
-                                          onApprove: model.approve, onReject: model.reject)
+                                          pendingClarification: model.pendingClarification,
+                                          onApprove: model.approve, onReject: model.reject,
+                                          onClarify: model.answerClarification, onCancelClarification: model.stop)
                     }
                     .id("workflow")
                 }
@@ -348,6 +380,11 @@ struct ContentView: View {
             .scrollIndicators(.automatic)
             .onChange(of: model.pendingAction) { _, action in
                 if action != nil, let node = model.workflowNodes.last(where: { $0.status == .awaitingApproval }) {
+                    reveal(node.id, in: scroll)
+                }
+            }
+            .onChange(of: model.pendingClarification) { _, request in
+                if request != nil, let node = model.workflowNodes.last(where: { $0.status == .awaitingApproval }) {
                     reveal(node.id, in: scroll)
                 }
             }
@@ -415,7 +452,7 @@ struct ContentView: View {
                         Label(model.demoMode ? "Run demo" : "Run task", systemImage: "arrow.up.right")
                     }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isCheckingArc)
                     .modifier(VoiceIdleModifier(speech: model.speech))
                     .keyboardShortcut(.return, modifiers: .command)
                 }
@@ -424,7 +461,7 @@ struct ContentView: View {
                 VoiceStatusDetails(speech: model.speech)
                 VoiceErrorNotice(speech: model.speech)
                 Rectangle().fill(Palette.line).frame(height: 1)
-                Label(model.demoMode ? "Demo uses a simulated desktop. No setup required." : "Live sends your command and screenshots to OpenAI.", systemImage: model.demoMode ? "play.rectangle" : "eye")
+                Label(model.demoMode ? "Demo uses a simulated desktop. No setup required." : (model.executionTarget == .backgroundArc ? "Arc sends page text and your command to OpenAI. Other apps stay available." : "Live sends your command and screenshots to OpenAI."), systemImage: model.demoMode ? "play.rectangle" : "eye")
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                     .padding(.horizontal, 20).padding(.vertical, 10)
             }
@@ -450,9 +487,15 @@ struct ContentView: View {
                 .modifier(VoiceIdleModifier(speech: model.speech))
             }
             HStack(spacing: 12) {
-                suggestion("Find something", detail: "Search for SwiftUI tutorials", icon: "safari", command: "Open Safari and search for SwiftUI tutorials")
-                suggestion("Open an app", detail: "Bring up Calculator", icon: "plus.forwardslash.minus", command: "Open Calculator")
-                suggestion("Find a folder", detail: "Show Downloads in Finder", icon: "folder", command: "Open Finder and show my Downloads folder")
+                if model.executionTarget == .backgroundArc && !model.demoMode {
+                    suggestion("Find something", detail: "Search for SwiftUI tutorials", icon: "magnifyingglass", command: "Search the web for SwiftUI tutorials")
+                    suggestion("Read a page", detail: "Summarize an article", icon: "doc.text", command: "Open https://www.swift.org and summarize the latest announcements")
+                    suggestion("Compare options", detail: "Research a browser task", icon: "rectangle.split.2x1", command: "Compare the getting-started guides for SwiftUI and AppKit on Apple's website")
+                } else {
+                    suggestion("Find something", detail: "Search for SwiftUI tutorials", icon: "safari", command: "Open Safari and search for SwiftUI tutorials")
+                    suggestion("Open an app", detail: "Bring up Calculator", icon: "plus.forwardslash.minus", command: "Open Calculator")
+                    suggestion("Find a folder", detail: "Show Downloads in Finder", icon: "folder", command: "Open Finder and show my Downloads folder")
+                }
             }
             Text("Suggestions fill the command box. You choose when to run.")
                 .font(.system(size: 10)).foregroundStyle(Palette.secondary)
@@ -513,7 +556,7 @@ private extension ApprovalMode {
     var explanation: String {
         switch self {
         case .everyAction:
-            return "Review each desktop change before it runs. Observations and waits continue automatically."
+            return "Review each action before it runs. Observations and waits continue automatically."
         case .sensitiveActions:
             return "Review actions flagged as sensitive. Other supported actions run automatically."
         case .fullAccess:
@@ -587,6 +630,70 @@ private struct CommandEditor: View {
         }
         .font(.system(size: 14))
         .frame(height: model.isRunning || model.selectedRunID != nil ? 60 : 88)
+    }
+}
+
+struct ClarificationCard: View {
+    let request: ClarificationRequest
+    let onContinue: (String) -> Void
+    let onCancel: () -> Void
+    @State private var selectedOption: String?
+    @State private var customAnswer = ""
+
+    private var answer: String {
+        let custom = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        return custom.isEmpty ? (selectedOption ?? "") : custom
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text(request.question)
+                .font(.system(size: 14, weight: .medium)).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            VStack(spacing: 7) {
+                ForEach(request.options, id: \.self) { option in
+                    Button {
+                        selectedOption = option
+                        customAnswer = ""
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: selectedOption == option && customAnswer.isEmpty ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(selectedOption == option && customAnswer.isEmpty ? Palette.blue : Palette.secondary)
+                                .padding(.top, 1)
+                            Text(option).font(.system(size: 12)).foregroundStyle(Palette.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(11).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selectedOption == option && customAnswer.isEmpty ? Palette.blue.opacity(0.07) : Palette.panel, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedOption == option && customAnswer.isEmpty ? Palette.blue.opacity(0.5) : Palette.line))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selectedOption == option && customAnswer.isEmpty ? .isSelected : [])
+                }
+            }
+            TextField("Or write your own answer…", text: $customAnswer, axis: .vertical)
+                .lineLimit(2...4)
+                .font(.system(size: 12)).textFieldStyle(.plain)
+                .padding(11)
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.line))
+                .accessibilityLabel("Custom answer")
+            if answer.count > 2_000 {
+                Text("Keep your answer under 2,000 characters.")
+                    .font(.system(size: 11)).foregroundStyle(Palette.danger)
+            }
+            HStack(spacing: 12) {
+                Button("Cancel task", action: onCancel).buttonStyle(SemanticButtonStyle(tone: .red))
+                Text("Your answer continues this same task.")
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                Spacer(minLength: 0)
+                Button("Continue") { onContinue(answer) }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(answer.isEmpty || answer.count > 2_000)
+            }
+        }
+        .onChange(of: request) { _, _ in selectedOption = nil; customAnswer = "" }
     }
 }
 
@@ -727,7 +834,7 @@ private struct VoiceControl: View {
                         VoiceInputMeter(level: speech.audioLevel)
                     }
                 }
-                Text(speech.isFinishing ? "Preparing the final text" : (speech.isListening ? "Click stop when finished" : (speech.isStarting ? "Preparing microphone access" : "Click to dictate")))
+                Text(speech.isFinishing ? "Transcribing on your Mac…" : (speech.isListening ? "Pause to transcribe, or click stop" : (speech.isStarting ? "Preparing microphone access" : "Click to dictate")))
                     .font(.system(size: 10))
                     .foregroundStyle(Palette.secondary)
             }
@@ -736,7 +843,7 @@ private struct VoiceControl: View {
 
     private var statusTitle: String {
         if speech.isStarting { return "Starting microphone…" }
-        if speech.isFinishing { return "Finishing transcript…" }
+        if speech.isFinishing { return "Transcribing…" }
         return speech.isListening ? "Listening…" : "Voice command"
     }
 
@@ -753,11 +860,14 @@ private struct VoiceStatusDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if speech.isStarting || speech.isListening || speech.isFinishing {
-                Text(speech.isFinishing ? "Wait for the final words, then review your command and run." : speech.audioStatus)
+                Text(speech.isFinishing ? "Whisper is transcribing locally. Review the command when it is ready." : speech.audioStatus)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(speech.isFinishing ? Palette.amber : Palette.secondary)
             }
             Text(speech.recognitionMode)
+                .font(.system(size: 10))
+                .foregroundStyle(Palette.secondary)
+            Text("Say your task, then “CU start” to run. Otherwise, review the transcript and click Run.")
                 .font(.system(size: 10))
                 .foregroundStyle(Palette.secondary)
         }
@@ -904,7 +1014,7 @@ private struct SettingsView: View {
                     settingsDivider
                     executionSection
                     settingsDivider
-                    permissionsSection
+                    if model.executionTarget == .backgroundArc { arcSection } else { permissionsSection }
                     privacySection
                 }
                 .padding(22)
@@ -1020,6 +1130,16 @@ private struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Eyebrow(text: "EXECUTION")
             HStack(spacing: 18) {
+                settingLabel("Target", detail: "Desktop controls apps. Arc controls a dedicated browser tab.")
+                Spacer(minLength: 12)
+                Picker("Execution target", selection: $model.executionTarget) {
+                    ForEach(ExecutionTarget.allCases) { target in Text(target.rawValue).tag(target) }
+                }
+                .labelsHidden().accessibilityLabel("Execution target")
+                .frame(width: 226)
+                .disabled(model.isCheckingArc)
+            }
+            HStack(spacing: 18) {
                 Text("Action approval").font(.system(size: 12, weight: .medium))
                 Spacer(minLength: 12)
                 ApprovalLevelPicker(selection: $model.approvalMode).frame(width: 226)
@@ -1058,10 +1178,31 @@ private struct SettingsView: View {
             }
             permissionRow("Accessibility", detail: "Allows clicks, typing, and keyboard shortcuts.", granted: model.accessibilityGranted, action: model.requestAccessibility)
             permissionRow("Screen recording", detail: "Allows the agent to see your desktop.", granted: model.screenRecordingGranted, action: model.requestScreenRecording)
-            Text("Microphone and speech recognition access are requested when you first use voice. macOS may require restarting the app after a permission change.")
+            Text("Microphone access is requested when you first use voice. Whisper transcribes recordings on this Mac. macOS may require restarting the app after a permission change.")
                 .font(.system(size: 10))
                 .foregroundStyle(Palette.secondary)
                 .lineSpacing(4)
+        }
+    }
+
+    private var arcSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Eyebrow(text: "BACKGROUND ARC SETUP")
+            Text("Allow Lite CU to automate Arc when macOS asks. In Arc, choose View → Developer → Allow JavaScript from Apple Events for page controls.")
+                .font(.system(size: 12)).foregroundStyle(Palette.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Works in a dedicated Arc tab using page text and elements. Opening the task window may briefly bring Arc forward. Desktop Accessibility and Screen Recording are not required for this target.")
+                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 14) {
+                Text(model.arcStatus)
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button(model.isCheckingArc ? "Checking…" : "Check Arc setup", action: model.checkArcConnection)
+                    .buttonStyle(PrimaryButtonStyle()).fixedSize()
+                    .disabled(model.isRunning || model.isCheckingArc)
+            }
         }
     }
 
@@ -1069,7 +1210,7 @@ private struct SettingsView: View {
         VStack(alignment: .leading, spacing: 9) {
             Label("What leaves your Mac", systemImage: "network")
                 .font(.system(size: 12, weight: .medium))
-            Text("Live runs send your command, desktop screenshots, and relevant action history to OpenAI. Voice uses Apple speech recognition and may use Apple servers when on-device recognition is unavailable. Demo runs simulate the workflow without sending a task to OpenAI.")
+            Text("Live runs send your command and relevant action history to OpenAI, plus desktop screenshots for Desktop or page text and elements for Background Arc. Whisper transcribes voice locally; audio stays on this Mac. Demo runs simulate the workflow without sending a task to OpenAI.")
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.secondary)
                 .lineSpacing(5)

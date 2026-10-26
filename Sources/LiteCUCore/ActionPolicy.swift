@@ -2,6 +2,7 @@ import Foundation
 
 public struct DecidedStep: Sendable {
     public let action: DesktopAction?
+    public let clarification: ClarificationRequest?
     public let result: String
     public let requiresConfirmation: Bool
 
@@ -14,17 +15,45 @@ public struct DecidedStep: Sendable {
         }
         if name == "finish" {
             guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw LiteCUError.message("The model returned an empty result.") }
-            return DecidedStep(action: nil, result: result, requiresConfirmation: false)
+            return DecidedStep(action: nil, clarification: nil, result: result, requiresConfirmation: false)
+        }
+        if name == "clarify" {
+            let request = try ActionPolicy.clarification(from: args)
+            return DecidedStep(action: nil, clarification: request, result: "", requiresConfirmation: false)
         }
         args["reason"] = .string(reason)
         let action = DesktopAction(name: name, arguments: .object(args))
         try ActionPolicy.validate(action)
-        return DecidedStep(action: action, result: result, requiresConfirmation: confirmation)
+        return DecidedStep(action: action, clarification: nil, result: result, requiresConfirmation: confirmation)
     }
 }
 
 public enum ActionPolicy {
-    public static let names = ["observe", "open_app", "open_url", "click", "type_text", "press_key", "scroll", "wait", "finish"]
+    public static let names = ["observe", "open_app", "open_url", "click", "type_text", "press_key", "scroll", "browser_click", "browser_type", "browser_scroll", "wait", "clarify", "finish"]
+
+    public static func clarification(from arguments: [String: JSONValue]) throws -> ClarificationRequest {
+        guard let rawQuestion = arguments["question"]?.string,
+              let values = arguments["options"]?.array, (2...4).contains(values.count) else {
+            throw LiteCUError.message("A clarification needs a question and 2–4 options. Nothing was executed.")
+        }
+        let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty, question.count <= 500 else {
+            throw LiteCUError.message("The clarification question must contain 1–500 characters.")
+        }
+        var options: [String] = []
+        for value in values {
+            guard let rawOption = value.string else { throw LiteCUError.message("Clarification options must be text.") }
+            let option = rawOption.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !option.isEmpty, option.count <= 120 else {
+                throw LiteCUError.message("Each clarification option must contain 1–120 characters.")
+            }
+            options.append(option)
+        }
+        guard Set(options.map { $0.lowercased() }).count == options.count else {
+            throw LiteCUError.message("Clarification options must be distinct.")
+        }
+        return ClarificationRequest(question: question, options: options)
+    }
     public static func validate(_ action: DesktopAction) throws {
         func string(_ key: String, limit: Int = 4000) throws -> String {
             guard let value = action.arguments[key].string, !value.isEmpty, value.count <= limit else {
@@ -49,9 +78,15 @@ public enum ActionPolicy {
             _ = try number("x", range: 0...10000); _ = try number("y", range: 0...10000)
             guard ["left", "right"].contains(try string("button")), action.arguments["double"].bool != nil else { throw LiteCUError.message("Invalid mouse button or click count.") }
         case "type_text": _ = try string("text")
+        case "browser_click": _ = try string("element_id", limit: 100)
+        case "browser_type":
+            _ = try string("element_id", limit: 100)
+            _ = try string("text")
         case "press_key": _ = try string("key", limit: 60)
-        case "scroll":
-            _ = try number("x", range: 0...10000); _ = try number("y", range: 0...10000)
+        case "scroll", "browser_scroll":
+            if action.name == "scroll" {
+                _ = try number("x", range: 0...10000); _ = try number("y", range: 0...10000)
+            }
             guard ["up", "down", "left", "right"].contains(try string("direction")) else { throw LiteCUError.message("Invalid scroll direction.") }
             let amount = try number("amount", range: 1...10)
             guard amount.rounded() == amount else { throw LiteCUError.message("Scroll amount must be a whole number.") }
@@ -62,7 +97,7 @@ public enum ActionPolicy {
 
     public static let schema: JSONValue = {
         func optional(_ type: String) -> JSONValue { .object(["type": .array([.string(type), .string("null")])]) }
-        let fields: [String: JSONValue] = ["x": optional("number"), "y": optional("number"), "button": optional("string"), "double": optional("boolean"), "text": optional("string"), "key": optional("string"), "url": optional("string"), "bundle_id": optional("string"), "direction": optional("string"), "amount": optional("integer"), "seconds": optional("number")]
+        let fields: [String: JSONValue] = ["x": optional("number"), "y": optional("number"), "button": optional("string"), "double": optional("boolean"), "text": optional("string"), "key": optional("string"), "url": optional("string"), "bundle_id": optional("string"), "direction": optional("string"), "amount": optional("integer"), "seconds": optional("number"), "element_id": optional("string"), "question": optional("string"), "options": .object(["type": .array([.string("array"), .string("null")]), "items": .object(["type": .string("string")])])]
         return .object([
             "type": .string("object"), "additionalProperties": .bool(false),
             "properties": .object([

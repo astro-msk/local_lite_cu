@@ -95,7 +95,7 @@ public struct CodexClient: ModelClient {
             try Self.writePrivate(try JSONEncoder().encode(schema), to: schemaFile)
             arguments += ["--output-schema", schemaFile.path]
         }
-        if let snapshot {
+        if let snapshot, !snapshot.imageDataURL.isEmpty {
             let parts = snapshot.imageDataURL.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
             guard parts.count == 2, parts[0].hasSuffix(";base64"),
                   let bytes = Data(base64Encoded: String(parts[1])), bytes.count <= 24 * 1_024 * 1_024 else {
