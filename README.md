@@ -32,7 +32,7 @@ This is an early testing prototype. Planning assistants run concurrently; a sing
 
 `ModelClient.generate(...)` is the replaceable model boundary. `OpenAIClient` calls the Responses API; `CodexClient` invokes a restricted Codex CLI process using its existing sign-in and returns the same text/JSON output to the app. Codex's desktop, browser, shell, MCP integrations, and native subagents are disabled in this adapter. It is still a CLI runtime bridge rather than a raw HTTP inference call; the app never delegates its desktop execution loop to Codex.
 
-The pipeline is defined in Swift, with [`AgentRunner.run(command:)`](Sources/LiteCUCore/AgentRunner.swift) as its entry point. The parallel planning requests and observe/action loop are both in that file. [`AppModel.run()`](Sources/LiteCU/AppModel.swift) selects the backend and connects approvals, cancellation, and progress to the UI. [`SpeechController`](Sources/LiteCU/SpeechController.swift) supplies the editable transcript, [`ActionPolicy`](Sources/LiteCUCore/ActionPolicy.swift) validates decisions, and [`MacDesktopDriver`](Sources/LiteCU/MacDesktopDriver.swift) observes and acts on the Mac.
+The pipeline is defined in Swift, with [`AgentRunner.run(command:)`](Sources/LiteCUCore/AgentRunner.swift) as its entry point. The parallel planning requests and observe/action loop are both in that file. It publishes typed `WorkflowNode` updates, which [`WorkflowGraphView`](Sources/LiteCU/WorkflowGraphView.swift) renders as the live graph. [`AppModel.run()`](Sources/LiteCU/AppModel.swift) selects the backend and connects approvals, cancellation, and progress to the UI. [`SpeechController`](Sources/LiteCU/SpeechController.swift) supplies the editable transcript, [`ActionPolicy`](Sources/LiteCUCore/ActionPolicy.swift) validates decisions, and [`MacDesktopDriver`](Sources/LiteCU/MacDesktopDriver.swift) observes and acts on the Mac.
 
 ## Run on your Mac
 
@@ -52,7 +52,9 @@ The script builds a release executable, creates and ad-hoc signs `dist/Lite CU.a
 4. Choose **Live**, enter a small task, and run. For example: “Open Safari and navigate to https://example.com.” Keep action approval enabled for the first experiments.
 5. For voice, click the microphone, wait for **Listening**, speak, then finish dictation. The input meter shows microphone activity. Wait for **Finishing transcript** to clear, review the text, and run. macOS will request Microphone and Speech Recognition access. If transcription fails, the app distinguishes missing audio, quiet input, and recognition failure and keeps any partial text.
 
-Lite CU hides its window during live control and brings it forward for approval and the result. Keep the target app on the main display and avoid using the mouse or keyboard during a live run. **⌘⇧Esc** stops from another app once Accessibility is granted; **⌘.** stops while Lite CU is active. Quitting also cancels active work.
+Lite CU hides its window during live control and brings it forward for approval and the result. Keep the target window entirely within one display and avoid using the mouse or keyboard during a live run. **⌘⇧Esc** stops from another app once Accessibility is granted; **⌘.** stops while Lite CU is active. Quitting also cancels active work.
+
+Use **New chat** for a fresh task and **Previous runs** to reopen a completed, stopped, or failed run without executing it again. The latest 100 finished runs are saved locally in `~/Library/Application Support/local.litecu.app/runs.json`, including commands, planning notes, action arguments, and results. Screenshots and model credentials are not stored in run history. Runs from older builds cannot be recovered because those builds did not save history.
 
 If macOS shows Accessibility enabled but Lite CU still reports it unavailable after a rebuild, remove only Lite CU from the Accessibility list and add the current `dist/Lite CU.app` again. This refreshes the stale development-build entry; do not reset permissions for other apps.
 
@@ -75,21 +77,31 @@ The optional **OpenAI API** backend uses `POST /v1/responses` with structured ou
 - Two concurrent read-only planning assistants and a coordinator.
 - A bounded observe/action/result loop, refreshing the screenshot after each action and after planning.
 - Open installed apps by bundle ID, open HTTP(S) URLs, click/double-click, type Unicode text, send shortcuts, scroll at a specific point, wait, and observe.
-- Main-display screenshots with explicit pixel-to-desktop coordinate mapping.
-- A visible activity timeline, plan, result, permission status, and raw proposed action arguments.
-- Per-action approval by default, cancellation, action limits, and repeated-action detection.
+- Screenshots of the display containing the foreground window, with explicit pixel-to-desktop coordinate mapping.
+- A live vertical workflow graph with connected planning cards, action outcomes, observations, inline approvals, and an inspectable completed path.
+- A Previous runs tab with locally saved workflow history and a New chat button for fresh tasks.
+- Compact session and approval controls, permission readiness, and exact proposed action arguments.
+- Three approval levels, an isolated approval preview, cancellation, action limits, and repeated-action detection.
 - Foreground/window identity checks before keyboard and pointer input, including returning from the approval UI.
 
 The two planning assistants inspect the same snapshot; they do not have search tools and cannot operate the desktop. Turning them off reduces model calls.
 
+## Approval levels
+
+- **Ask every action** (default): review each desktop change before it runs.
+- **Ask for sensitive actions**: routine actions run automatically; model-marked sensitive actions pause for approval.
+- **Approve all (Full access)**: all supported actions run without an app approval prompt, including actions the model marks sensitive. macOS permissions, action validation, limits, and emergency stop still apply.
+
+The approval preview uses a sample action and never calls the desktop driver. Approving or rejecting the sample only demonstrates the UI. Approval level is fixed for a running task; restart with a different level to change its behavior.
+
 ## Limits and data handling
 
-- Live mode sends the command and main-display screenshots to the selected model backend. Close unrelated sensitive windows before testing. This app runs locally; model inference is remote.
+- Live mode sends the command and screenshots of the active app's display to the selected model backend. Close unrelated sensitive windows before testing. This app runs locally; model inference is remote.
 - Speech uses on-device recognition when available. Otherwise macOS may send audio to Apple; the app displays the active recognition mode. The app does not record audio files.
 - Codex request files and screenshots are private temporary files removed at request completion. `--ephemeral` disables persisted Codex session rollouts; this is not a guarantee about service-side retention or CLI operational logs.
-- Only the main display is controlled. Global mouse/keyboard events occupy your foreground session. Keyboard shortcut letters use ANSI physical key positions.
+- One display is captured at a time, following the foreground window. A window spanning displays must be moved entirely onto one display. Global mouse/keyboard events occupy your foreground session. Keyboard shortcut letters use ANSI physical key positions.
 - Window changes and unexpected foreground-app changes abort input. Content can still change inside the same window between observation and action; this prototype is not a hardened automation sandbox.
-- Model-marked sensitive actions require approval even when routine approvals are disabled. That classification is model-based, not a deterministic guarantee. There is no arbitrary shell or AppleScript action tool.
+- Sensitive-action classification is model-based, not a deterministic guarantee; Full access skips those prompts too. There is no arbitrary shell or AppleScript action tool.
 - A maximum of 1–30 actions per run and a 120-second timeout per model request bound execution. Stop prevents future actions; it cannot undo an input already sent.
 - Each Codex step is a new process. A persistent app-server connection, accessibility element targeting, background browser workers, and resumable sessions are future improvements.
 
@@ -108,7 +120,7 @@ swift run LiteCUCheck --codex --gpt-6-sol
 
 The tests use fake model/desktop implementations to cover approval, cancellation, action validation, limits, refreshed observations, and concurrent planning. The demo check exercises the full coordinator loop. The vision smoke test sends a generated test card rather than a desktop screenshot.
 
-Initial verification on Apple Silicon/macOS 26: all 15 automated tests, native build, and demo UI passed; Codex structured text passed with both GPT‑6.1 Sol and GPT‑6 Sol, and synthetic-image input passed with GPT‑6.1 Sol. Microphone transcription and live OS input require user-granted permissions and a hands-on test; they are not claimed as end-to-end verified.
+Verification on Apple Silicon/macOS 26: all 22 automated tests, native build, and demo UI passed. History storage smoke checks cover round-trip data, duplicate IDs, the 100-run limit, and preservation of unreadable history. The Previous runs screen, read-only graph, New chat, and both approval-preview decisions were exercised in the app. Light and dark graph layouts were inspected at compact and larger window sizes. Earlier live checks passed Codex structured text with both GPT‑6.1 Sol and GPT‑6 Sol, synthetic-image input with GPT‑6.1 Sol, and on-device speech with a final transcript retained after Stop. Full live-task completion still needs a hands-on check after the display-selection fix.
 
 Source layout:
 

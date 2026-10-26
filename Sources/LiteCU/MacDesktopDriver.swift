@@ -79,8 +79,6 @@ final class MacDesktopDriver: DesktopDriving {
         guard Self.hasScreenRecordingPermission else {
             throw LiteCUError.message("Allow Screen Recording for LiteCU in System Settings → Privacy & Security, then reopen the app if macOS requests it.")
         }
-        let displayID = CGMainDisplayID()
-        let bounds = CGDisplayBounds(displayID)
         guard let application = NSWorkspace.shared.frontmostApplication else {
             throw LiteCUError.message("No foreground app is available. Bring the target app forward and try again.")
         }
@@ -89,9 +87,10 @@ final class MacDesktopDriver: DesktopDriving {
         }
         let window = try focusedWindow(application)
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-            throw LiteCUError.message("The main display is unavailable for capture.")
-        }
+        let capture = try captureDisplay(for: window, from: content.displays)
+        let display = capture.display
+        let displayID = display.displayID
+        let bounds = capture.bounds
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
         configuration.width = min(1440, display.width)
@@ -100,7 +99,7 @@ final class MacDesktopDriver: DesktopDriving {
         configuration.scalesToFit = true
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
         try Task.checkCancellation()
-        guard CGMainDisplayID() == displayID, CGDisplayBounds(displayID) == bounds else {
+        guard CGDisplayIsActive(displayID) != 0, CGDisplayBounds(displayID) == bounds else {
             throw LiteCUError.message("The display configuration changed during capture. Observe again before acting.")
         }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
@@ -117,8 +116,38 @@ final class MacDesktopDriver: DesktopDriving {
         let appName = application.localizedName ?? "Unknown"
         let bundleID = application.bundleIdentifier ?? "Unknown"
         let title = window?.title ?? "Unavailable"
-        let context = "Main display only. Foreground app: \(appName). Bundle ID: \(bundleID). Window: \(title). Screenshot: \(image.width)×\(image.height) pixels. Coordinates use screenshot pixels, origin at top left."
-        return DesktopSnapshot(imageDataURL: "data:image/jpeg;base64," + data.base64EncodedString(), width: image.width, height: image.height, context: context)
+        let displayContext = window == nil
+            ? "Main display fallback: no focused window is available. Keyboard and pointer actions are unavailable until an app has a focused window."
+            : "Captured the display containing the focused window (display \(displayID)). Only this display is visible."
+        let context = "\(displayContext) Foreground app: \(appName). Bundle ID: \(bundleID). Window: \(title). Screenshot: \(image.width)×\(image.height) pixels. Coordinates use screenshot pixels, origin at top left."
+        let windowTitle = window?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let summary = windowTitle.isEmpty ? appName : "\(appName) · \(windowTitle)"
+        return DesktopSnapshot(imageDataURL: "data:image/jpeg;base64," + data.base64EncodedString(), width: image.width, height: image.height, context: context, summary: summary)
+    }
+
+    private func captureDisplay(for window: ObservedWindow?, from displays: [SCDisplay]) throws -> (display: SCDisplay, bounds: CGRect) {
+        let activeDisplays = displays.filter { CGDisplayIsActive($0.displayID) != 0 }
+        guard let window else {
+            guard let main = activeDisplays.first(where: { $0.displayID == CGMainDisplayID() }) else {
+                throw LiteCUError.message("The main display is unavailable for capture. Bring a target window forward and try again.")
+            }
+            return (main, CGDisplayBounds(main.displayID))
+        }
+        // AX window bounds and CG display bounds share global desktop coordinates.
+        // Capture one entire display so screenshot pixels map directly to CG input.
+        let intersections = activeDisplays.map { display in
+            let bounds = CGDisplayBounds(display.displayID)
+            let intersection = bounds.intersection(window.bounds)
+            let area = intersection.isNull ? 0 : intersection.width * intersection.height
+            return (display: display, bounds: bounds, area: area)
+        }
+        guard let best = intersections.max(by: { $0.area < $1.area }), best.area > 0 else {
+            throw LiteCUError.message("The focused window is not on an available display. Move it onto a connected display and run the task again.")
+        }
+        guard best.bounds.contains(window.bounds) else {
+            throw LiteCUError.message("The focused window spans displays or extends offscreen. Move it fully onto one display and run the task again.")
+        }
+        return (best.display, best.bounds)
     }
 
     func execute(_ action: DesktopAction) async throws -> String {
@@ -255,11 +284,7 @@ final class MacDesktopDriver: DesktopDriving {
     }
 
     private func screenPoint(_ arguments: [String: JSONValue]) throws -> CGPoint {
-        guard let geometry = captureGeometry else { throw LiteCUError.message("Observe the desktop before clicking.") }
-        guard CGMainDisplayID() == geometry.displayID, CGDisplayBounds(geometry.displayID) == geometry.bounds else {
-            captureGeometry = nil
-            throw LiteCUError.message("The display configuration changed. Observe again before clicking.")
-        }
+        let geometry = try validatedCaptureGeometry()
         let x = try number("x", in: arguments, range: 0...Double(geometry.width))
         let y = try number("y", in: arguments, range: 0...Double(geometry.height))
         guard x < Double(geometry.width), y < Double(geometry.height) else { throw LiteCUError.message("Click coordinates are outside the screenshot.") }
@@ -269,6 +294,10 @@ final class MacDesktopDriver: DesktopDriving {
 
     /// Approving an action activates LiteCU. Return input to the app the model actually observed.
     private func restoreObservedApplication() async throws {
+        guard observedWindow != nil else {
+            throw LiteCUError.message("No focused window was observed. Bring a target window forward and run the task again before sending keyboard or pointer input.")
+        }
+        _ = try validatedCaptureGeometry()
         guard let pid = observedApplicationPID,
               let target = NSRunningApplication(processIdentifier: pid), !target.isTerminated else {
             throw LiteCUError.message("The observed app is no longer available. Observe the desktop again before sending input.")
@@ -292,12 +321,25 @@ final class MacDesktopDriver: DesktopDriving {
     }
 
     private func validateInputTarget(compareTitle: Bool = true) throws {
-        guard let pid = observedApplicationPID, captureGeometry != nil,
+        _ = try validatedCaptureGeometry()
+        guard let pid = observedApplicationPID, observedWindow != nil,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
               let application = NSRunningApplication(processIdentifier: pid), !application.isTerminated,
               windowsMatch(observedWindow, try focusedWindow(application), compareTitle: compareTitle) else {
             throw LiteCUError.message("The observed app or window changed. No further input was sent. Bring the target window forward and run the task again.")
         }
+    }
+
+    private func validatedCaptureGeometry() throws -> CaptureGeometry {
+        guard let geometry = captureGeometry else {
+            throw LiteCUError.message("Observe the desktop before sending keyboard or pointer input.")
+        }
+        guard CGDisplayIsActive(geometry.displayID) != 0,
+              CGDisplayBounds(geometry.displayID) == geometry.bounds else {
+            captureGeometry = nil
+            throw LiteCUError.message("The captured display changed or disconnected. Observe again before sending input.")
+        }
+        return geometry
     }
 
     private func windowsMatch(_ first: ObservedWindow?, _ second: ObservedWindow?, compareTitle: Bool = true) -> Bool {

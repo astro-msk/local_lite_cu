@@ -18,7 +18,7 @@ final class AppModel: ObservableObject {
     @Published var isCheckingCodex = false
     @Published var codexConnectionChecked = false
     @Published var demoMode = true
-    @Published var confirmActions = true
+    @Published var approvalMode: ApprovalMode = .everyAction
     @Published var useSubagents = true
     @Published var maxSteps = 12
     @Published var apiKeyInput = ""
@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
     @Published var isStopping = false
     @Published var stage = "Ready"
     @Published var events: [RunEvent] = []
+    @Published var workflowNodes: [WorkflowNode] = []
     @Published var plan = ""
     @Published var result = ""
     @Published var pendingAction: DesktopAction?
@@ -36,12 +37,18 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var accessibilityGranted = false
     @Published var screenRecordingGranted = false
+    @Published var savedRuns: [SavedRun] = []
+    @Published var selectedRunID: UUID?
+    @Published var historyError: String?
     let speech = SpeechController()
     private let desktop = MacDesktopDriver()
     private var task: Task<Void, Never>?
     private var voiceStartTask: Task<Void, Never>?
     private var voiceStartID: UUID?
     private var approval: CheckedContinuation<Bool, Never>?
+    private let historyStore = RunHistoryStore()
+    private var activeRunID: UUID?
+    private var runStartedAt = Date()
     private var subscriptions = Set<AnyCancellable>()
 
     var modelConnectionReady: Bool {
@@ -59,6 +66,8 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        do { savedRuns = try historyStore.load() }
+        catch { historyError = error.localizedDescription }
         keySaved = KeychainStore.load() != nil
         refreshPermissions()
         speech.$transcript.dropFirst().sink { [weak self] text in
@@ -72,7 +81,7 @@ final class AppModel: ObservableObject {
     }
 
     func run() {
-        guard !isRunning else { return }
+        guard !isRunning, selectedRunID == nil else { return }
         guard voiceStartID == nil && !speech.isStarting && !speech.isListening && !speech.isFinishing else {
             errorMessage = "Stop dictation and wait for the transcript before running your task."
             return
@@ -83,7 +92,7 @@ final class AppModel: ObservableObject {
             errorMessage = "Live desktop control needs Accessibility and Screen Recording. Enable them in Settings, then try again."
             showSettings = true; return
         }
-        let config = RunConfiguration(model: modelName, apiKey: KeychainStore.load() ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "", demo: demoMode, confirmActions: confirmActions, useSubagents: useSubagents, maxSteps: maxSteps)
+        let config = RunConfiguration(model: modelName, apiKey: KeychainStore.load() ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "", demo: demoMode, approvalMode: approvalMode, useSubagents: useSubagents, maxSteps: maxSteps)
         let client: any ModelClient
         if demoMode { client = DemoModelClient() }
         else if backend == "Codex" {
@@ -95,10 +104,12 @@ final class AppModel: ObservableObject {
         }
         let driver: any DesktopDriving = config.demo ? DemoDesktopDriver() : desktop
         let runner = AgentRunner(driver: driver, client: client, configuration: config)
+        activeRunID = UUID(); runStartedAt = Date()
         events = [RunEvent("user", command)]
-        plan = ""; result = ""; errorMessage = nil; pendingAction = nil; stepCount = 0
+        plan = ""; result = ""; errorMessage = nil; pendingAction = nil; stepCount = 0; workflowNodes = []
         isRunning = true; isStopping = false; stage = "Planning"
         runner.onEvent = { [weak self] in self?.events.append($0) }
+        runner.onWorkflow = { [weak self] in self?.workflowNodes = $0 }
         runner.onStage = { [weak self] nextStage in
             guard let self, !self.isStopping else { return }
             self.stage = nextStage
@@ -119,6 +130,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             defer {
                 self.isRunning = false; self.isStopping = false; self.pendingAction = nil; self.task = nil
+                self.saveCurrentRun()
+                self.activeRunID = nil
                 NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
             }
             do {
@@ -144,6 +157,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var canStartNewChat: Bool {
+        !isRunning && voiceStartID == nil && !speech.isStarting && !speech.isListening && !speech.isFinishing
+    }
+
+    func newChat() {
+        guard canStartNewChat else { return }
+        selectedRunID = nil
+        command = ""; workflowNodes = []; events = []; plan = ""; result = ""
+        errorMessage = nil; pendingAction = nil; stepCount = 0; stage = "Ready"
+    }
+
+    func openRun(_ run: SavedRun) {
+        guard canStartNewChat else { return }
+        selectedRunID = run.id
+        command = run.command; workflowNodes = run.nodes; result = run.result
+        stage = run.stage; stepCount = run.stepCount; errorMessage = nil
+        events = []; plan = run.nodes.first(where: { $0.kind == .planning })?.detail ?? ""
+    }
+
+    private func saveCurrentRun() {
+        guard let id = activeRunID else { return }
+        let run = SavedRun(id: id, command: command, startedAt: runStartedAt,
+                           modelName: modelName, backend: backend, demoMode: demoMode,
+                           stage: stage, result: result, nodes: workflowNodes,
+                           stepCount: stepCount, maxSteps: maxSteps)
+        savedRuns.removeAll { $0.id == id }
+        savedRuns.insert(run, at: 0)
+        savedRuns = Array(savedRuns.prefix(100))
+        do { try historyStore.save(savedRuns); historyError = nil }
+        catch { historyError = error.localizedDescription }
+    }
+
     func stop() {
         voiceStartTask?.cancel()
         voiceStartTask = nil; voiceStartID = nil
@@ -162,7 +207,7 @@ final class AppModel: ObservableObject {
     }
     func reject() { stop() }
     func toggleVoice() {
-        guard !isRunning && voiceStartID == nil && !speech.isStarting && !speech.isFinishing else { return }
+        guard !isRunning && selectedRunID == nil && voiceStartID == nil && !speech.isStarting && !speech.isFinishing else { return }
         if speech.isListening { speech.stop() }
         else {
             let startID = UUID()

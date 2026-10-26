@@ -36,8 +36,9 @@ public struct DesktopSnapshot: Sendable {
     public let width: Int
     public let height: Int
     public let context: String
-    public init(imageDataURL: String, width: Int, height: Int, context: String) {
-        self.imageDataURL = imageDataURL; self.width = width; self.height = height; self.context = context
+    public let summary: String
+    public init(imageDataURL: String, width: Int, height: Int, context: String, summary: String = "") {
+        self.imageDataURL = imageDataURL; self.width = width; self.height = height; self.context = context; self.summary = summary
     }
 }
 
@@ -49,20 +50,55 @@ public struct DesktopAction: Equatable, Sendable {
     public var isReadOnly: Bool { name == "observe" || name == "wait" }
 }
 
+public enum WorkflowNodeKind: String, Equatable, Sendable {
+    case input, planning, action, observation, result
+}
+
+public enum WorkflowNodeStatus: String, Equatable, Sendable {
+    case active, awaitingApproval, complete, stopped, failed
+}
+
+public struct WorkflowNode: Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var kind: WorkflowNodeKind
+    public var title: String
+    public var detail: String
+    public var notes: [String]
+    public var status: WorkflowNodeStatus
+    public var action: DesktopAction?
+
+    public init(id: UUID = UUID(), kind: WorkflowNodeKind, title: String, detail: String = "", notes: [String] = [], status: WorkflowNodeStatus = .active, action: DesktopAction? = nil) {
+        self.id = id; self.kind = kind; self.title = title; self.detail = detail; self.notes = notes; self.status = status; self.action = action
+    }
+}
+
 @MainActor public protocol DesktopDriving: AnyObject {
     func snapshot() async throws -> DesktopSnapshot
     func execute(_ action: DesktopAction) async throws -> String
+}
+
+public enum ApprovalMode: String, CaseIterable, Identifiable, Sendable {
+    case everyAction = "Every action"
+    case sensitiveActions = "Sensitive actions"
+    case fullAccess = "Full access"
+
+    public var id: String { rawValue }
 }
 
 public struct RunConfiguration: Sendable {
     public var model: String
     public var apiKey: String
     public var demo: Bool
-    public var confirmActions: Bool
+    public var approvalMode: ApprovalMode
     public var useSubagents: Bool
     public var maxSteps: Int
-    public init(model: String = "gpt-6.1-sol", apiKey: String = "", demo: Bool = true, confirmActions: Bool = true, useSubagents: Bool = true, maxSteps: Int = 12) {
-        self.model = model; self.apiKey = apiKey; self.demo = demo; self.confirmActions = confirmActions; self.useSubagents = useSubagents; self.maxSteps = maxSteps
+    public init(model: String = "gpt-6.1-sol", apiKey: String = "", demo: Bool = true, approvalMode: ApprovalMode = .everyAction, useSubagents: Bool = true, maxSteps: Int = 12) {
+        self.model = model; self.apiKey = apiKey; self.demo = demo; self.approvalMode = approvalMode; self.useSubagents = useSubagents; self.maxSteps = maxSteps
+    }
+
+    /// Preserves the original toggle's semantics: false still confirms sensitive actions.
+    public init(model: String = "gpt-6.1-sol", apiKey: String = "", demo: Bool = true, confirmActions: Bool, useSubagents: Bool = true, maxSteps: Int = 12) {
+        self.init(model: model, apiKey: apiKey, demo: demo, approvalMode: confirmActions ? .everyAction : .sensitiveActions, useSubagents: useSubagents, maxSteps: maxSteps)
     }
 }
 

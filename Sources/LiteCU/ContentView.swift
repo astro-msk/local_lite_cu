@@ -4,26 +4,30 @@ import LiteCUCore
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @State private var showApprovalPreview = false
+    @State private var followLive = true
+    @State private var section: WorkspaceSection = .workspace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar.frame(width: 184)
-            Rectangle().fill(Palette.line).frame(width: 1)
-            VStack(spacing: 0) {
-                topBar
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Palette.line).frame(height: 1)
+            if section == .history {
+                history
+            } else {
+                if isPreviousRun { previousRunBanner } else { controlStrip }
                 Rectangle().fill(Palette.line).frame(height: 1)
-                HStack(alignment: .top, spacing: 0) {
-                    mainContent.frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
-                    Rectangle().fill(Palette.line).frame(width: 1)
-                    sessionPanel.frame(width: 274)
-                }
+                workspace
             }
         }
         .foregroundStyle(Palette.text)
         .background(Palette.background)
         .tint(Palette.blue)
-        .sheet(isPresented: $model.showSettings) {
-            SettingsView(model: model)
+        .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+        .sheet(isPresented: $showApprovalPreview) { ApprovalPreviewView() }
+        .onChange(of: model.isRunning) { _, running in
+            if running { showApprovalPreview = false }
         }
         .onAppear { model.refreshPermissions() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -31,514 +35,665 @@ struct ContentView: View {
         }
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "cursorarrow.motionlines")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(Palette.onBrand)
-                    .frame(width: 32, height: 32)
-                    .background(Palette.brandFill, in: RoundedRectangle(cornerRadius: 9))
-                Text("lite cu").font(.system(size: 21, weight: .semibold, design: .rounded))
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "cursorarrow.motionlines")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(Palette.onBrand)
+                .frame(width: 37, height: 37)
+                .background(Palette.brandFill, in: RoundedRectangle(cornerRadius: 11))
+            Text("lite cu").font(.system(size: 22, weight: .semibold, design: .rounded)).fixedSize()
+            Picker("View", selection: sectionBinding) {
+                Text("Workspace").tag(WorkspaceSection.workspace)
+                Text("Previous runs").tag(WorkspaceSection.history)
             }
-            .padding(.top, 38)
-            .padding(.bottom, 26)
-
-            Eyebrow(text: "LOCAL WORKSPACE")
-                .padding(.bottom, 13)
-            HStack(spacing: 10) {
-                Image(systemName: "square.stack.3d.up")
-                    .foregroundStyle(Palette.accent)
-                Text("Current session").font(.system(size: 12, weight: .medium))
-                Spacer(minLength: 0)
-            }
-            .padding(12)
-            .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Palette.line))
-
-            Spacer()
-
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 7) {
-                    Circle().fill(model.demoMode ? Palette.amber : Palette.accent).frame(width: 6, height: 6)
-                    Text(model.demoMode ? "SIMULATION MODE" : "LIVE MODE")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .tracking(1)
+            .labelsHidden()
+            .accessibilityLabel("Workspace view")
+            .pickerStyle(.segmented)
+            .frame(width: 210, height: 28)
+            .disabled(!model.canStartNewChat)
+            .modifier(VoiceIdleModifier(speech: model.speech))
+            Spacer(minLength: 10)
+            if section == .workspace && !isPreviousRun {
+                Picker("Model", selection: $model.modelName) {
+                    Text("GPT 6.1 Sol").tag("gpt-6.1-sol")
+                    Text("GPT 6 Sol").tag("gpt-6-sol")
                 }
-                Text(model.demoMode ? "Explore the workflow with a simulated desktop." : "Actions run on this Mac. You remain in control.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.secondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                .labelsHidden()
+                .accessibilityLabel("Model")
+                .frame(width: 132, height: 28)
+                .disabled(model.isRunning)
+                Picker("Execution mode", selection: $model.demoMode) {
+                    Text("Demo").tag(true)
+                    Text("Live").tag(false)
+                }
+                .labelsHidden()
+                .accessibilityLabel("Execution mode")
+                .pickerStyle(.segmented)
+                .frame(width: 112, height: 28)
+                .disabled(model.isRunning)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Palette.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-            .padding(.bottom, 18)
-
+            Button(action: startNewChat) { Label("New chat", systemImage: "plus") }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(!model.canStartNewChat)
+                .modifier(VoiceIdleModifier(speech: model.speech))
+                .help("Start a new computer-use task.")
             Button { model.showSettings = true } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "slider.horizontal.3")
-                    Text("Settings")
-                    Spacer()
-                    Text("⌘,").font(.system(size: 11, design: .monospaced))
-                }
-                .font(.system(size: 12))
-                .foregroundStyle(Palette.secondary)
-                .padding(.vertical, 10)
+                Image(systemName: "slider.horizontal.3").frame(width: 15)
             }
-            .buttonStyle(.plain)
-            .padding(.bottom, 14)
+            .buttonStyle(SecondaryButtonStyle())
+            .accessibilityLabel("Settings")
+            .help("Settings · ⌘,")
         }
-        .padding(.horizontal, 16)
-        .background(Palette.sidebar)
+        .frame(maxWidth: 1080)
+        .padding(.horizontal, 28)
+        .padding(.top, 21)
+        .frame(maxWidth: .infinity)
+        .frame(height: 84)
+        .background(Palette.panel)
     }
 
-    private var topBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "desktopcomputer").font(.system(size: 13))
-            Text("This Mac").font(.system(size: 12, weight: .medium))
-            Spacer()
-            if model.isRunning {
-                Button(action: model.stop) { Label(model.stage == "Stopping" ? "Stopping…" : "Stop", systemImage: "stop.fill") }
+    private var isPreviousRun: Bool { model.selectedRunID != nil }
+    private var selectedRun: SavedRun? { model.savedRuns.first { $0.id == model.selectedRunID } }
+
+    private var sectionBinding: Binding<WorkspaceSection> {
+        Binding(get: { section }, set: { value in
+            guard model.canStartNewChat else { return }
+            section = value
+        })
+    }
+
+    private func startNewChat() {
+        guard model.canStartNewChat else { return }
+        model.newChat()
+        showApprovalPreview = false
+        section = .workspace
+    }
+
+    private var previousRunBanner: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 18)).foregroundStyle(Palette.blue)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 9) {
+                    Text("Previous run").font(.system(size: 12, weight: .semibold))
+                    if let run = selectedRun {
+                        Text(run.startedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                            .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        Text(run.stage == "Complete" ? "Run finished" : run.stage)
+                            .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                    }
+                }
+                if let run = selectedRun {
+                    Text("\(run.demoMode ? "Demo" : "Live") · \(run.modelName) · \(run.backend) · \(run.stepCount) / \(run.maxSteps) actions")
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                }
+                Text("Read only. Start a new chat to run another task.")
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+            }
+            Spacer(minLength: 12)
+            Button("New chat", action: startNewChat).buttonStyle(PrimaryButtonStyle())
+                .disabled(!model.canStartNewChat)
+                .modifier(VoiceIdleModifier(speech: model.speech))
+        }
+        .frame(maxWidth: 1080)
+        .padding(.horizontal, 28).padding(.vertical, 15)
+        .frame(maxWidth: .infinity)
+        .background(Palette.sidebar.opacity(0.6))
+    }
+
+    private var history: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Previous runs").font(.system(size: 25, weight: .semibold, design: .rounded))
+                    Text("Revisit the plan, actions, and observations from earlier tasks.")
+                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                }
+                if let error = model.historyError {
+                    InlineNotice(icon: "exclamationmark.triangle", text: error, color: Palette.amber)
+                }
+                if model.savedRuns.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Image(systemName: "clock.arrow.circlepath").font(.system(size: 25)).foregroundStyle(Palette.blue)
+                        Text("No previous runs yet").font(.system(size: 16, weight: .semibold))
+                        Text("Finished tasks will appear here. Start a new chat to try your first one.")
+                            .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                        Button("New chat", action: startNewChat).buttonStyle(PrimaryButtonStyle())
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(25)
+                    .background(Palette.panel, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.line))
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(model.savedRuns) { run in historyRow(run) }
+                    }
+                }
+            }
+            .frame(maxWidth: 1080, alignment: .leading)
+            .padding(.horizontal, 28).padding(.vertical, 28)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func historyRow(_ run: SavedRun) -> some View {
+        Button {
+            guard model.canStartNewChat else { return }
+            model.openRun(run)
+            section = .workspace
+        } label: {
+            HStack(spacing: 16) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 16)).foregroundStyle(Palette.blue)
+                    .frame(width: 35, height: 35)
+                    .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(run.command).font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Palette.text).lineLimit(2).multilineTextAlignment(.leading)
+                    HStack(spacing: 9) {
+                        Text(run.startedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                        Text("·")
+                        Text(run.demoMode ? "Demo" : "Live")
+                        Text("·")
+                        Text(run.modelName)
+                    }
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                }
+                Spacer(minLength: 12)
+                Text(run.stage == "Complete" ? "Run finished" : run.stage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(run.stage == "Failed" ? Palette.danger : Palette.secondary)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Palette.elevated, in: Capsule())
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.line))
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canStartNewChat)
+        .modifier(VoiceIdleModifier(speech: model.speech))
+        .accessibilityLabel("Open previous run: \(run.command)")
+        .help("Open this saved workflow without running any actions.")
+    }
+
+    private var controlStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    if model.isRunning {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Circle().fill(statusColor).frame(width: 7, height: 7)
+                    }
+                    Text(model.stage == "Complete" ? "Run finished" : model.stage)
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                if !model.workflowNodes.isEmpty {
+                    Text("\(model.stepCount) / \(model.maxSteps) actions")
+                        .font(.system(size: 11)).monospacedDigit().foregroundStyle(Palette.secondary)
+                }
+                Spacer(minLength: 12)
+                Text("Approval").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                ApprovalLevelPicker(selection: $model.approvalMode)
+                    .frame(width: 228)
+                    .disabled(model.isRunning)
+                Button {
+                    guard !model.isRunning else { return }
+                    showApprovalPreview = true
+                } label: {
+                    Label("Preview", systemImage: "eye")
+                }
+                .buttonStyle(SemanticButtonStyle(tone: .yellow))
+                .disabled(model.isRunning)
+                .accessibilityLabel("Preview approval")
+                .help("Test approval controls with an isolated sample. No desktop action runs.")
+                if model.isRunning {
+                    Button(action: model.stop) {
+                        Label(model.stage == "Stopping" ? "Stopping…" : "Stop", systemImage: "stop.fill")
+                    }
                     .buttonStyle(SemanticButtonStyle(tone: .red))
                     .disabled(model.stage == "Stopping")
                     .keyboardShortcut(".", modifiers: .command)
+                }
             }
-            Text(model.backend)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Palette.secondary)
-                .padding(.horizontal, 10)
-                .frame(height: 28)
-                .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 6))
-            Picker("Model", selection: $model.modelName) {
-                Text("GPT 6.1 Sol").tag("gpt-6.1-sol")
-                Text("GPT 6 Sol").tag("gpt-6-sol")
+            HStack(spacing: 12) {
+                Text(model.approvalMode.explanation)
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                Spacer(minLength: 12)
+                if model.isRunning {
+                    Text("Emergency stop  ⌘ ⇧ Esc")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Palette.secondary)
+                        .fixedSize()
+                } else if !model.demoMode {
+                    liveReadiness
+                } else {
+                    Label("Simulated desktop", systemImage: "play.rectangle")
+                        .font(.system(size: 10)).foregroundStyle(Palette.secondary).fixedSize()
+                }
             }
-            .labelsHidden()
-            .controlSize(.regular)
-            .frame(width: 136, height: 28)
-            .disabled(model.isRunning)
-            Picker("Execution mode", selection: $model.demoMode) {
-                Text("Demo").tag(true)
-                Text("Live").tag(false)
-            }
-            .labelsHidden()
-            .accessibilityLabel("Execution mode")
-            .pickerStyle(.segmented)
-            .controlSize(.regular)
-            .frame(width: 118, height: 28)
-            .disabled(model.isRunning)
         }
-        .foregroundStyle(Palette.secondary)
-        .padding(.horizontal, 22)
-        .frame(height: 58)
+        .frame(maxWidth: 1080)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .background(Palette.sidebar.opacity(0.6))
     }
 
-    private var mainContent: some View {
+    @ViewBuilder
+    private var liveReadiness: some View {
+        if !model.accessibilityGranted || !model.screenRecordingGranted {
+            Button("Set up desktop access") { model.showSettings = true }
+                .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
+                .foregroundStyle(Palette.blue).fixedSize()
+        } else if !model.modelConnectionReady {
+            if model.backend == "Codex" && !model.codexPath.isEmpty {
+                Button(model.isCheckingCodex ? "Checking connection…" : "Check connection", action: model.checkCodex)
+                    .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
+                    .foregroundStyle(Palette.blue).fixedSize()
+                    .disabled(model.isCheckingCodex)
+            } else {
+                Button("Set up model connection") { model.showSettings = true }
+                    .font(.system(size: 11, weight: .semibold)).buttonStyle(.plain)
+                    .foregroundStyle(Palette.blue).fixedSize()
+            }
+        } else {
+            Label("Desktop & connection ready", systemImage: "checkmark.circle.fill")
+                .font(.system(size: 10)).foregroundStyle(Palette.accent).fixedSize()
+        }
+    }
+
+    private var workspace: some View {
         ScrollViewReader { scroll in
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    introduction
+                VStack(alignment: .leading, spacing: 26) {
                     composer.id("composer")
-                    workflow
                     if let error = model.errorMessage {
-                        InlineNotice(icon: "exclamationmark.triangle", text: error, color: Palette.amber)
+                        InlineNotice(icon: "exclamationmark.triangle", text: error, color: Palette.danger)
                     }
-                    if let action = model.pendingAction {
-                        approvalCard(action).id("approval")
+                    if let error = model.historyError {
+                        InlineNotice(icon: "externaldrive.badge.exclamationmark", text: error, color: Palette.amber)
                     }
-                    timeline
+                    if model.workflowNodes.isEmpty && !isPreviousRun { startingPoints }
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("Workflow").font(.system(size: 19, weight: .semibold, design: .rounded))
+                            Spacer()
+                            if model.isRunning {
+                                Toggle("Follow live", isOn: $followLive)
+                                    .toggleStyle(.checkbox)
+                                    .font(.system(size: 11))
+                                    .fixedSize()
+                                    .help("Keep the latest workflow step in view as the task runs.")
+                            } else {
+                                Text(model.workflowNodes.isEmpty ? "A visible path from command to result" : "The plan, actions, and observations from this run")
+                                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                            }
+                        }
+                        WorkflowGraphView(nodes: model.workflowNodes, isRunning: model.isRunning, stage: model.stage, isReadOnly: isPreviousRun,
+                                          onApprove: model.approve, onReject: model.reject)
+                    }
+                    .id("workflow")
                 }
-                .padding(.horizontal, 22)
-                .padding(.top, 24)
-                .padding(.bottom, 24)
+                .frame(maxWidth: 1080)
+                .padding(.horizontal, 28)
+                .padding(.top, 25)
+                .padding(.bottom, 34)
+                .frame(maxWidth: .infinity)
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.automatic)
             .onChange(of: model.pendingAction) { _, action in
-                if action != nil {
-                    withAnimation(.easeInOut(duration: 0.2)) { scroll.scrollTo("approval", anchor: .top) }
+                if action != nil, let node = model.workflowNodes.last(where: { $0.status == .awaitingApproval }) {
+                    reveal(node.id, in: scroll)
                 }
             }
             .onChange(of: model.result) { _, result in
-                if !result.isEmpty {
-                    withAnimation(.easeInOut(duration: 0.2)) { scroll.scrollTo("result", anchor: .top) }
+                if !isPreviousRun, !result.isEmpty, let node = model.workflowNodes.last(where: { $0.kind == .result }) {
+                    reveal(node.id, in: scroll)
                 }
             }
             .onChange(of: model.isRunning) { _, running in
                 if running {
-                    withAnimation(.easeInOut(duration: 0.2)) { scroll.scrollTo("composer", anchor: .top) }
+                    followLive = true
+                    reveal("workflow", in: scroll)
                 }
+            }
+            .onChange(of: model.workflowNodes.last?.id) { _, nodeID in
+                if nodeID == nil {
+                    reveal("composer", in: scroll)
+                } else if model.isRunning, followLive, let nodeID {
+                    reveal(nodeID, in: scroll)
+                }
+            }
+            .onChange(of: model.stage) { _, stage in
+                if !isPreviousRun, ["Failed", "Stopped"].contains(stage), let node = model.workflowNodes.last {
+                    reveal(node.id, in: scroll)
+                }
+            }
+            .onChange(of: model.selectedRunID) { _, _ in
+                reveal("composer", in: scroll)
             }
         }
     }
 
-    private var introduction: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Your desktop assistant")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .tracking(-0.4)
-            Text("Give it a task. Review the plan. Follow the progress.")
-                .font(.system(size: 12))
-                .foregroundStyle(Palette.secondary)
+    private func reveal<ID: Hashable>(_ id: ID, in scroll: ScrollViewProxy) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+            scroll.scrollTo(id, anchor: .top)
         }
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                if model.command.isEmpty {
-                    Text("Ask me to do something on your Mac…")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Palette.secondary)
-                        .padding(.top, 10)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $model.command)
-                    .font(.system(size: 14))
-                    .foregroundStyle(Palette.text)
-                    .scrollContentBackground(.hidden)
-                    .frame(height: 100)
-                    .disabled(model.isRunning)
-                    .modifier(VoiceIdleModifier(speech: model.speech))
-                    .accessibilityLabel("Task to perform")
-            }
-            .padding(.horizontal, 15)
-            .padding(.top, 12)
-
-            HStack(spacing: 10) {
-                VoiceControl(speech: model.speech, isRunning: model.isRunning, toggle: model.toggleVoice)
-                Spacer(minLength: 0)
-                if model.isRunning {
-                    Button(action: model.stop) {
-                        Label(model.stage == "Stopping" ? "Stopping…" : "Stop task", systemImage: "stop.fill")
-                    }
-                    .buttonStyle(SemanticButtonStyle(tone: .red))
-                    .disabled(model.stage == "Stopping")
+            HStack {
+                Text(isPreviousRun ? "SAVED COMMAND" : (model.isRunning ? "CURRENT COMMAND" : "COMMAND"))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.1).foregroundStyle(Palette.secondary)
+                Spacer()
+                if model.isRunning || isPreviousRun {
+                    Label(isPreviousRun ? "Read only" : "Locked during this run", systemImage: "lock")
+                        .font(.system(size: 10)).foregroundStyle(Palette.secondary)
                 } else {
+                    Text("⌘ Return to run").font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.secondary)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            CommandEditor(model: model, speech: model.speech)
+                .padding(.horizontal, 15)
+                .padding(.top, 7)
+            if model.isRunning || isPreviousRun {
+                Color.clear.frame(height: 12)
+            } else {
+                HStack(spacing: 10) {
+                    VoiceControl(speech: model.speech, isRunning: model.isRunning, toggle: model.toggleVoice)
+                    Spacer(minLength: 0)
                     Button(action: model.run) {
-                        HStack(spacing: 8) {
-                            Text(model.demoMode ? "Run demo" : "Run task")
-                            Image(systemName: "arrow.up.right")
-                        }
+                        Label(model.demoMode ? "Run demo" : "Run task", systemImage: "arrow.up.right")
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .modifier(VoiceIdleModifier(speech: model.speech))
                     .keyboardShortcut(.return, modifiers: .command)
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                VoiceStatusDetails(speech: model.speech)
+                VoiceErrorNotice(speech: model.speech)
+                Rectangle().fill(Palette.line).frame(height: 1)
+                Label(model.demoMode ? "Demo uses a simulated desktop. No setup required." : "Live sends your command and screenshots to OpenAI.", systemImage: model.demoMode ? "play.rectangle" : "eye")
+                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
             }
-            .padding(14)
-            VoiceStatusDetails(speech: model.speech)
-            VoiceErrorNotice(speech: model.speech)
-            Rectangle().fill(Palette.line).frame(height: 1)
-            HStack(spacing: 7) {
-                Image(systemName: model.demoMode ? "play.rectangle" : "eye")
-                Text(model.demoMode ? "Demo simulates actions. Your desktop stays untouched." : "Live sends your command and screenshots to OpenAI.")
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(Palette.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
         }
-        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.line))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Palette.line))
     }
 
-    private var workflow: some View {
-        HStack(spacing: 0) {
-            WorkflowStep(number: 1, title: "Input", icon: "text.cursor", active: stageIndex == 0 && flowActive, complete: stageIndex > 0)
-            workflowConnector
-            WorkflowStep(number: 2, title: "Plan", icon: "list.bullet", active: stageIndex == 1 && flowActive, complete: stageIndex > 1)
-            workflowConnector
-            WorkflowStep(number: 3, title: "Act", icon: "cursorarrow", active: stageIndex == 2 && flowActive, complete: stageIndex > 2)
-            workflowConnector
-            WorkflowStep(number: 4, title: "Result", icon: "checkmark", active: stageIndex == 3 && flowActive, complete: false)
-        }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Workflow: Input, Plan, Act, Result. Current state: \(model.stage)")
-    }
-
-    private var workflowConnector: some View {
-        Rectangle().fill(Palette.line).frame(maxWidth: .infinity).frame(height: 1).padding(.horizontal, 8)
-    }
-
-    private var stageIndex: Int {
-        switch model.stage {
-        case "Planning": return 1
-        case "Acting", "Awaiting approval": return 2
-        case "Complete": return 3
-        default: return model.stepCount > 0 ? 2 : (model.plan.isEmpty ? 0 : 1)
-        }
-    }
-
-    private var flowActive: Bool { !["Failed", "Stopped", "Stopping"].contains(model.stage) }
-
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if !model.result.isEmpty { resultCard.id("result") }
+    private var startingPoints: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Eyebrow(text: "ACTIVITY")
+                Text("Start with something small").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                if !model.events.isEmpty {
-                    Text("\(model.events.count) events")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(Palette.secondary)
-                }
-            }
-
-            if model.events.isEmpty {
-                emptyTimeline
-            } else {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(model.events) { event in
-                        EventCard(event: event)
-                    }
-                }
-            }
-        }
-    }
-
-    private var resultCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Result", systemImage: "checkmark.circle.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text(model.result)
-                .font(.system(size: 13))
-                .lineSpacing(5)
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(17)
-        .background(Palette.accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Palette.accent.opacity(0.25)))
-    }
-
-    private var emptyTimeline: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 13) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 19))
-                    .foregroundStyle(Palette.accent)
-                    .frame(width: 37, height: 37)
-                    .background(Palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(model.demoMode ? "See how a task runs" : "Start with a small desktop task")
-                        .font(.system(size: 14, weight: .medium))
-                    Text(model.demoMode ? "Try a simulated browser task to see the plan, actions, and result. No permissions or model connection needed." : "For example: open Safari and search for SwiftUI tutorials. Type it above, or dictate it, then run when ready.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.secondary)
-                        .lineSpacing(4)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            HStack(spacing: 10) {
                 Button {
+                    guard canEditCommand else { return }
                     model.demoMode = true
                     model.command = "Open Safari and search for SwiftUI tutorials"
                     model.run()
                 } label: {
-                    Label("Try demo", systemImage: "play.fill")
+                    Label("Try a demo", systemImage: "play.fill")
                 }
-                .buttonStyle(SemanticButtonStyle(tone: .blue))
-                .disabled(model.isRunning)
+                .buttonStyle(PrimaryButtonStyle())
                 .modifier(VoiceIdleModifier(speech: model.speech))
-                Button("Set up live control") { model.showSettings = true }
-                    .buttonStyle(SecondaryButtonStyle())
             }
+            HStack(spacing: 12) {
+                suggestion("Find something", detail: "Search for SwiftUI tutorials", icon: "safari", command: "Open Safari and search for SwiftUI tutorials")
+                suggestion("Open an app", detail: "Bring up Calculator", icon: "plus.forwardslash.minus", command: "Open Calculator")
+                suggestion("Find a folder", detail: "Show Downloads in Finder", icon: "folder", command: "Open Finder and show my Downloads folder")
+            }
+            Text("Suggestions fill the command box. You choose when to run.")
+                .font(.system(size: 10)).foregroundStyle(Palette.secondary)
         }
-        .padding(19)
-        .background(Palette.panel.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.line))
     }
 
-    private func approvalCard(_ action: DesktopAction) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Label("Your approval is needed", systemImage: "hand.raised")
+    private func suggestion(_ title: String, detail: String, icon: String, command: String) -> some View {
+        Button {
+            guard canEditCommand else { return }
+            model.command = command
+        } label: {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: icon).font(.system(size: 16)).foregroundStyle(Palette.blue)
+                    .frame(width: 22, height: 24)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.text)
+                    Text(detail).font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.left").font(.system(size: 10)).foregroundStyle(Palette.secondary)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(Palette.line))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isRunning)
+        .modifier(VoiceIdleModifier(speech: model.speech))
+        .accessibilityLabel("Use example: \(command)")
+        .help("Fill the command box without running it.")
+    }
+
+    private var canEditCommand: Bool {
+        !isPreviousRun && !model.isRunning && !model.speech.isStarting && !model.speech.isListening && !model.speech.isFinishing
+    }
+
+    private var statusColor: Color {
+        if ["Failed", "Stopped", "Stopping"].contains(model.stage) { return Palette.amber }
+        return model.stage == "Ready" ? Palette.secondary : Palette.accent
+    }
+}
+
+private enum WorkspaceSection: Hashable {
+    case workspace, history
+}
+
+private extension ApprovalMode {
+    var displayName: String {
+        switch self {
+        case .everyAction: return "Ask every action"
+        case .sensitiveActions: return "Ask for sensitive actions"
+        case .fullAccess: return "Approve all (Full access)"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .everyAction:
+            return "Review each desktop change before it runs. Observations and waits continue automatically."
+        case .sensitiveActions:
+            return "Review actions flagged as sensitive. Other supported actions run automatically."
+        case .fullAccess:
+            return "Auto-approve supported actions. Existing macOS permissions, action validation, and step limits still apply."
+        }
+    }
+}
+
+private struct ApprovalLevelPicker: View {
+    @Binding var selection: ApprovalMode
+
+    var body: some View {
+        Picker("Approval level", selection: $selection) {
+            ForEach(ApprovalMode.allCases) { mode in
+                Text(mode.displayName).tag(mode)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .accessibilityLabel("Approval level")
+        .accessibilityHint("Controls which actions ask for confirmation during the next run.")
+        .font(.system(size: 11, weight: .medium))
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Render an actual read-only view during capture and execution. A disabled
+/// native TextEditor can still accept some accessibility-driven text changes.
+private struct CommandEditor: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var speech: SpeechController
+
+    private var isReadOnly: Bool {
+        model.selectedRunID != nil || model.isRunning || speech.isStarting || speech.isListening || speech.isFinishing
+    }
+
+    private var guardedCommand: Binding<String> {
+        Binding(get: { model.command }, set: { value in
+            guard model.selectedRunID == nil, !model.isRunning, !speech.isStarting, !speech.isListening, !speech.isFinishing else { return }
+            model.command = value
+        })
+    }
+
+    var body: some View {
+        Group {
+            if isReadOnly {
+                ScrollView {
+                    Text(model.command.isEmpty ? "Your transcript will appear here…" : model.command)
+                        .foregroundStyle(model.command.isEmpty ? Palette.secondary : Palette.text)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(.horizontal, 5)
+                        .padding(.top, 0)
+                }
+                .accessibilityLabel(model.selectedRunID != nil ? "Saved command, read only" : (model.isRunning ? "Current task, read only" : "Voice transcript, read only"))
+            } else {
+                ZStack(alignment: .topLeading) {
+                    if model.command.isEmpty {
+                        Text("Ask me to do something on your Mac…")
+                            .foregroundStyle(Palette.secondary)
+                            .padding(.top, 0)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: guardedCommand)
+                        .foregroundStyle(Palette.text)
+                        .scrollContentBackground(.hidden)
+                        .accessibilityLabel("Task to perform")
+                }
+            }
+        }
+        .font(.system(size: 14))
+        .frame(height: model.isRunning || model.selectedRunID != nil ? 60 : 88)
+    }
+}
+
+struct ActionApprovalCard: View {
+    let action: DesktopAction
+    var isPreview = false
+    var isInteractive = true
+    let onApprove: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: isPreview ? 9 : 13) {
+            Label(isPreview ? "Sample action" : "Your approval is needed", systemImage: "hand.raised")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Palette.amber)
             Text(action.summary).font(.system(size: 12)).lineSpacing(4).lineLimit(4)
             VStack(alignment: .leading, spacing: 8) {
                 Text(action.name).font(.system(size: 11, weight: .semibold, design: .monospaced))
                 ScrollView {
-                    Text(actionArguments(action))
+                    Text(arguments)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Palette.text)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(height: 150)
+                .frame(height: isPreview ? 80 : 150)
                 .accessibilityLabel("Exact action arguments")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
+            .padding(isPreview ? 10 : 12)
             .background(Palette.background, in: RoundedRectangle(cornerRadius: 8))
             HStack {
-                Button("Reject & stop", action: model.reject).buttonStyle(SemanticButtonStyle(tone: .red))
+                Button(isPreview ? "Reject sample" : "Reject & stop", action: onReject)
+                    .buttonStyle(SemanticButtonStyle(tone: .red))
                 Spacer()
-                Button("Approve action", action: model.approve).buttonStyle(SemanticButtonStyle(tone: .yellow))
+                Button(isPreview ? "Approve sample" : "Approve action", action: onApprove)
+                    .buttonStyle(SemanticButtonStyle(tone: .yellow))
             }
+            .disabled(!isInteractive)
         }
-        .padding(17)
+        .padding(isPreview ? 14 : 17)
         .background(Palette.amber.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.amber.opacity(0.30)))
     }
 
-    private func actionArguments(_ action: DesktopAction) -> String {
+    private var arguments: String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         guard let data = try? encoder.encode(action.arguments) else { return "Unable to display arguments" }
         return String(decoding: data, as: UTF8.self)
     }
+}
 
-    private var sessionPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Eyebrow(text: "SESSION")
-                    HStack(spacing: 10) {
-                        if model.isRunning {
-                            ProgressView().controlSize(.small).scaleEffect(0.8)
-                        } else {
-                            Circle().fill(statusColor).frame(width: 7, height: 7)
-                        }
-                        Text(model.stage).font(.system(size: 15, weight: .medium))
-                    }
-                    Text(model.demoMode ? "A simulated run. Your desktop is untouched." : "Live runs act on this Mac using your selected model.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Palette.secondary)
-                        .lineSpacing(4)
-                    HStack {
-                        Text("Actions")
-                        Spacer()
-                        Text("\(model.stepCount) / \(model.maxSteps)").monospacedDigit()
-                    }
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.secondary)
-                }
-                if !model.demoMode && !model.isRunning { readinessCard }
-                panelDivider
-                agentsPanel
-                panelDivider
-                configurationPanel
-                if !model.plan.isEmpty {
-                    panelDivider
-                    VStack(alignment: .leading, spacing: 12) {
-                        Eyebrow(text: "CURRENT PLAN")
-                        Text(model.plan)
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.secondary)
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
-                    }
-                }
-                panelDivider
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "stop.circle")
-                        Text("Emergency stop")
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    Text("⌘ ⇧ Esc")
-                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    Text("Stops the current task, including while another app is in front.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Palette.secondary)
-                        .lineSpacing(4)
-                }
-            }
-            .padding(20)
-            .padding(.top, 4)
-        }
-        .scrollIndicators(.hidden)
-    }
+/// This view owns only sample state. It has no model, network, or desktop driver.
+private struct ApprovalPreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var approved: Bool?
 
-    private var readinessCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !model.accessibilityGranted || !model.screenRecordingGranted {
-                Label("Desktop access needed", systemImage: "lock")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.amber)
-                Text("Enable \(missingPermissions) to let Lite CU see and control your desktop.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Set up permissions") { model.showSettings = true }
-                    .buttonStyle(SemanticButtonStyle(tone: .yellow))
-            } else if !model.modelConnectionReady {
-                Label("Model connection", systemImage: "network")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(model.modelConnectionSummary)
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                    .lineLimit(4)
-                if model.backend == "Codex" && !model.codexConnectionChecked && !model.codexPath.isEmpty {
-                    Button(model.isCheckingCodex ? "Checking…" : "Check connection", action: model.checkCodex)
-                        .buttonStyle(PrimaryButtonStyle())
-                        .disabled(model.isCheckingCodex)
-                    Text("You can also connect by running a task.")
-                        .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-                } else {
-                    Button("Connection settings") { model.showSettings = true }
-                        .buttonStyle(PrimaryButtonStyle())
-                }
-            } else {
-                Label("Ready for live tasks", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.accent)
-                Text(model.modelConnectionSummary)
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 9))
-    }
+    private let sample = DesktopAction(name: "open_app", arguments: .object([
+        "bundle_id": .string("com.apple.Safari"),
+        "reason": .string("Open Safari for a sample browser task.")
+    ]))
 
-    private var missingPermissions: String {
-        if !model.accessibilityGranted && !model.screenRecordingGranted { return "Accessibility and Screen Recording" }
-        return model.accessibilityGranted ? "Screen Recording" : "Accessibility"
-    }
-
-    private var agentsPanel: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Eyebrow(text: "AGENT TEAM")
-            AgentRow(title: "Coordinator", subtitle: model.stage == "Planning" ? "Planning the task" : (model.stage == "Stopping" ? "Stopping the current run" : (model.isRunning ? "Managing this run" : "Plans and delegates")), symbol: "point.3.connected.trianglepath.dotted", active: model.isRunning && model.stage != "Stopping")
-            AgentRow(title: "Route & verification", subtitle: model.useSubagents ? "Parallel planning enabled" : "Parallel planning disabled", symbol: "square.stack.3d.up", active: model.useSubagents && model.stage == "Planning")
-            AgentRow(title: "Desktop operator", subtitle: model.stage == "Awaiting approval" ? "Waiting for your approval" : (model.stage == "Acting" ? "Working on the desktop" : "One action at a time"), symbol: "cursorarrow", active: model.stage == "Acting" || model.stage == "Awaiting approval")
-        }
-    }
-
-    private var configurationPanel: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Eyebrow(text: "CONFIGURATION")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Approval preview").font(.system(size: 22, weight: .semibold, design: .rounded))
+                    Text("Try the controls without running a task.")
+                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                }
                 Spacer()
-                Button { model.showSettings = true } label: {
-                    Image(systemName: "slider.horizontal.3").font(.system(size: 11))
-                }.buttonStyle(.plain).foregroundStyle(Palette.secondary)
-                    .accessibilityLabel("Open configuration settings")
+                Button("Done") { dismiss() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.cancelAction)
             }
-            ConfigurationRow(title: "Action approval", value: model.confirmActions ? "On" : "Off", good: model.confirmActions)
-            ConfigurationRow(title: "Backend", value: model.backend, good: true)
-            Text(model.modelConnectionSummary)
-                .font(.system(size: 11))
-                .foregroundStyle(model.modelConnectionReady ? Palette.accent : Palette.secondary)
+            Label("Preview only. This sample never opens Safari, sends a request, or controls your desktop.", systemImage: "eye")
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.blue)
                 .fixedSize(horizontal: false, vertical: true)
-            if model.backend == "OpenAI API" {
-                ConfigurationRow(title: "Keychain", value: model.keySaved ? "Saved" : "Not saved", good: model.keySaved)
+            ActionApprovalCard(action: sample, isPreview: true, isInteractive: approved == nil,
+                               onApprove: { approved = true }, onReject: { approved = false })
+            if let approved {
+                HStack(alignment: .top, spacing: 11) {
+                    Image(systemName: approved ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(approved ? Palette.accent : Palette.danger)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(approved ? "Sample approved" : "Sample rejected")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("No action was executed. This decision only updates the preview.")
+                            .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Try again") { self.approved = nil }.buttonStyle(SecondaryButtonStyle())
+                }
+                .padding(13)
+                .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 9))
+            } else {
+                Text("Choose Approve sample or Reject sample to see the result.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.secondary)
             }
-            ConfigurationRow(title: "Accessibility", value: model.accessibilityGranted ? "Allowed" : "Not enabled", good: model.accessibilityGranted)
-            ConfigurationRow(title: "Screen recording", value: model.screenRecordingGranted ? "Allowed" : "Not enabled", good: model.screenRecordingGranted)
+            Spacer(minLength: 0)
         }
-    }
-
-    private var panelDivider: some View { Rectangle().fill(Palette.line).frame(height: 1) }
-
-    private var statusColor: Color {
-        if ["Failed", "Stopped", "Stopping"].contains(model.stage) { return Palette.amber }
-        return model.stage == "Ready" ? Palette.secondary : Palette.accent
+        .padding(22)
+        .frame(width: 560, height: 600)
+        .foregroundStyle(Palette.text)
+        .background(Palette.background)
+        .tint(Palette.blue)
     }
 }
 
@@ -607,7 +762,7 @@ private struct VoiceStatusDetails: View {
                 .foregroundStyle(Palette.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 15)
+        .padding(.horizontal, 20)
         .padding(.bottom, 11)
         .accessibilityElement(children: .combine)
     }
@@ -643,117 +798,9 @@ private struct VoiceErrorNotice: View {
     var body: some View {
         if let error = speech.error {
             InlineNotice(icon: "mic.slash", text: error, color: Palette.danger)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 12)
         }
-    }
-}
-
-private struct WorkflowStep: View {
-    let number: Int
-    let title: String
-    let icon: String
-    let active: Bool
-    let complete: Bool
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: complete ? "checkmark" : icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(active || complete ? Palette.accent : Palette.secondary)
-                .frame(width: 26, height: 26)
-                .background(active ? Palette.accent.opacity(0.1) : Palette.panel, in: Circle())
-                .overlay(Circle().stroke(active ? Palette.accent.opacity(0.35) : Palette.line))
-            Text(title)
-                .font(.system(size: 11, weight: active ? .semibold : .regular))
-                .foregroundStyle(active ? Palette.text : Palette.secondary)
-        }
-        .fixedSize()
-    }
-}
-
-private struct EventCard: View {
-    let event: RunEvent
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.accent.opacity(0.85))
-                .frame(width: 26, height: 26)
-                .background(Palette.accent.opacity(0.065), in: RoundedRectangle(cornerRadius: 7))
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(event.role.replacingOccurrences(of: "_", with: " ").capitalized)
-                        .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    Text(event.date, style: .time)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Palette.secondary)
-                }
-                Text(event.message)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.secondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.line))
-    }
-
-    private var icon: String {
-        let role = event.role.lowercased()
-        if role.contains("plan") { return "list.bullet" }
-        if role.contains("user") { return "person" }
-        if role.contains("action") || role.contains("operator") || role.contains("exec") { return "cursorarrow" }
-        if role.contains("result") || role.contains("complete") { return "checkmark" }
-        if role.contains("error") { return "exclamationmark.triangle" }
-        if role.contains("research") || role.contains("agent") || role.contains("review") { return "square.stack.3d.up" }
-        return "circle.dotted"
-    }
-}
-
-private struct AgentRow: View {
-    let title: String
-    let subtitle: String
-    let symbol: String
-    let active: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
-                .font(.system(size: 12))
-                .foregroundStyle(active ? Palette.accent : Palette.secondary)
-                .frame(width: 28, height: 28)
-                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.system(size: 12, weight: .medium))
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-}
-
-private struct ConfigurationRow: View {
-    let title: String
-    let value: String
-    let good: Bool
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).foregroundStyle(Palette.secondary)
-            Spacer(minLength: 5)
-            Text(value).foregroundStyle(good ? Palette.text : Palette.secondary)
-        }
-        .font(.system(size: 11))
     }
 }
 
@@ -973,11 +1020,13 @@ private struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Eyebrow(text: "EXECUTION")
             HStack(spacing: 18) {
-                settingLabel("Approve desktop actions", detail: "Pause before clicks, typing, or other desktop changes.")
+                Text("Action approval").font(.system(size: 12, weight: .medium))
                 Spacer(minLength: 12)
-                Toggle("Approve desktop actions", isOn: $model.confirmActions)
-                    .labelsHidden().fixedSize()
+                ApprovalLevelPicker(selection: $model.approvalMode).frame(width: 226)
             }
+            Text(model.approvalMode.explanation)
+                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 18) {
                 settingLabel("Parallel planning agents", detail: "Compare a route and verification plan before acting.")
                 Spacer(minLength: 12)
