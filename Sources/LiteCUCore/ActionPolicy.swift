@@ -72,6 +72,10 @@ public enum ActionPolicy {
             guard id.range(of: "^[A-Za-z0-9][A-Za-z0-9.-]+$", options: .regularExpression) != nil else { throw LiteCUError.message("Invalid app bundle identifier.") }
         case "open_url":
             let raw = try string("url")
+            // Model citation delimiters are not part of a navigable address.
+            guard !raw.unicodeScalars.contains(where: { (0xE200...0xE205).contains($0.value) }) else {
+                throw LiteCUError.message("The URL contains model citation markers. Nothing was opened; retry with the exact address.")
+            }
             guard let url = URL(string: raw), ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil,
                   url.user == nil, url.password == nil else { throw LiteCUError.message("Only HTTP and HTTPS URLs without embedded credentials are supported.") }
         case "click":

@@ -13,6 +13,14 @@ struct ActionPolicyTests {
     }
 
     @Test
+    func testRejectsModelCitationMarkersInURLs() {
+        for url in ["https://example.com/\u{E201}", "https://example.com/\u{E200}cite\u{E202}turn0search0\u{E201}"] {
+            #expect(throws: (any Error).self) { try ActionPolicy.validate(action("open_url", ["url": .string(url)])) }
+        }
+        #expect(throws: Never.self) { try ActionPolicy.validate(action("open_url", ["url": .string("https://example.com/café")])) }
+    }
+
+    @Test
     func testRejectsUnknownActionAndMissingClickCoordinates() {
         #expect(throws: (any Error).self) { try ActionPolicy.validate(action("shell", ["command": .string("pwd")])) }
         #expect(throws: (any Error).self) { try ActionPolicy.validate(action("click", ["y": .number(10), "button": .string("left"), "double": .bool(false)])) }

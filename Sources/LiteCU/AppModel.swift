@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     @Published var executionTarget: ExecutionTarget = .desktop
     @Published var arcStatus = "Allow Automation for Arc, then enable Allow JavaScript from Apple Events in Arc."
     @Published var isCheckingArc = false
+    @Published var isTestingArcPage = false
     @Published var arcConnectionChecked = false
     @Published var approvalMode: ApprovalMode = .everyAction
     @Published var useSubagents = true
@@ -58,6 +59,7 @@ final class AppModel: ObservableObject {
     private let desktop = MacDesktopDriver()
     private let arc = ArcBrowserDriver()
     private var task: Task<Void, Never>?
+    private var arcTestTask: Task<Void, Never>?
     private var voiceStartTask: Task<Void, Never>?
     private var voiceStartID: UUID?
     private var approval: CheckedContinuation<Bool, Never>?
@@ -235,6 +237,7 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        arcTestTask?.cancel()
         voiceStartTask?.cancel()
         voiceStartTask = nil; voiceStartID = nil
         speech.abort()
@@ -324,6 +327,54 @@ final class AppModel: ObservableObject {
             } catch { arcStatus = error.localizedDescription }
         }
     }
+    func testArcPage() {
+        guard !isRunning, !isCheckingArc else { return }
+        isCheckingArc = true
+        isTestingArcPage = true
+        arcStatus = "Opening example.com in a separate Arc test window…"
+        arcTestTask = Task {
+            defer { isCheckingArc = false; isTestingArcPage = false; arcTestTask = nil }
+            let driver = ArcBrowserDriver()
+            do {
+                _ = try await driver.execute(DesktopAction(name: "open_url", arguments: .object(["url": .string("https://example.com/")])))
+                let page = try await waitForArcTestPage(driver, host: "example.com")
+                guard page["title"].string == "Example Domain",
+                      let link = page["elements"].array?.first(where: { $0["name"].string == "Learn more" }),
+                      let elementID = link["id"].string,
+                      let href = link["href"].string,
+                      URL(string: href)?.host == "iana.org" || URL(string: href)?.host == "www.iana.org" else {
+                    throw LiteCUError.message("The test page did not contain the expected Example Domain title and IANA link.")
+                }
+                arcStatus = "Read Example Domain. Clicking its Learn more link…"
+                _ = try await driver.execute(DesktopAction(name: "browser_click", arguments: .object(["element_id": .string(elementID)])))
+                let destination = try await waitForArcTestPage(driver, host: "iana.org")
+                guard let title = destination["title"].string, !title.isEmpty else {
+                    throw LiteCUError.message("The destination loaded without a page title.")
+                }
+                arcConnectionChecked = true
+                arcStatus = "Browser test passed: opened Example Domain, read the page, clicked Learn more, and verified \(title). No model was used."
+            } catch is CancellationError { arcStatus = "Browser test stopped." }
+            catch { arcStatus = error.localizedDescription }
+        }
+    }
+
+    func stopArcTest() { arcTestTask?.cancel() }
+
+    private func waitForArcTestPage(_ driver: ArcBrowserDriver, host: String) async throws -> JSONValue {
+        for _ in 0..<30 {
+            try Task.checkCancellation()
+            let snapshot = try await driver.snapshot()
+            if let page = try? JSONDecoder().decode(JSONValue.self, from: Data(snapshot.context.utf8)),
+               let address = page["url"].string,
+               let actualHost = URL(string: address)?.host,
+               actualHost == host || actualHost == "www." + host {
+                return page
+            }
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        throw LiteCUError.message("The browser test did not observe the expected \(host) page in time. Check the test window before retrying.")
+    }
+
     func checkCodex() {
         guard !isCheckingCodex else { return }
         isCheckingCodex = true

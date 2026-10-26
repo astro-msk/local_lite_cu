@@ -67,29 +67,15 @@ import LiteCUCore
             if tabID == nil {
                 let restoreLiteCU = NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
                 defer { if restoreLiteCU { NSApp.activate(ignoringOtherApps: true) } }
-                let result = try await call(body: """
-                    tell application id "company.thebrowser.Browser"
-                        set taskWindow to make new window
-                        set createdWindowID to id of taskWindow
-                        tell taskWindow
-                            set taskTab to make new tab with properties {URL:\(Self.appleScriptLiteral(url))}
-                            set createdTabID to id of taskTab
-                        end tell
-                    end tell
-                    return my jsonResult({|ok|:true, |window_id|:createdWindowID, |tab_id|:createdTabID})
-                    """)
-                guard let win = result["window_id"].string, let tab = result["tab_id"].string else {
+                let result = try await call(body: Self.creationScript(url: url))
+                guard let win = result["window_id"].string, !win.isEmpty,
+                      let tab = result["tab_id"].string, !tab.isEmpty else {
                     throw LiteCUError.message("Arc did not return a task tab identifier. The window may have opened; check it before retrying.")
                 }
                 windowID = win; tabID = tab
             } else {
-                _ = try await call(body: try targetScript() + """
-
-                    tell application id "company.thebrowser.Browser"
-                        set URL of taskTab to \(Self.appleScriptLiteral(url))
-                    end tell
-                    return my jsonResult({|ok|:true})
-                    """)
+                let target = try targetIDs()
+                _ = try await call(body: Self.navigationScript(windowID: target.windowID, tabID: target.tabID, url: url))
             }
             return "Navigated the dedicated Arc tab to \(url). Page content still needs verification."
         case "browser_click", "browser_type", "browser_scroll":
@@ -103,36 +89,100 @@ import LiteCUCore
         }
     }
 
-    private func targetScript() throws -> String {
+    private func targetIDs() throws -> (windowID: String, tabID: String) {
         guard let windowID, let tabID else {
             throw LiteCUError.message("No owned task tab. Open a URL first.")
         }
-        return Self.targetScript(windowID: windowID, tabID: tabID)
+        return (windowID, tabID)
+    }
+
+    static func creationScript(url: String) -> String {
+        // Arc may return missing value from make. Discover only IDs introduced by
+        // this creation attempt; never infer ownership from front/active position.
+        """
+        tell application id "company.thebrowser.Browser"
+            set operationPhase to "Reading Arc windows before creation"
+            set previousWindowIDs to id of every window
+            set operationPhase to "Creating the Arc task window"
+            make new window
+            set createdWindowID to missing value
+            set operationPhase to "Identifying the new Arc task window"
+            repeat 20 times
+                set addedWindowIDs to my addedIDs(previousWindowIDs, id of every window)
+                if (count of addedWindowIDs) > 1 then error "Arc window creation was ambiguous: several new windows appeared. Check Arc before retrying."
+                if (count of addedWindowIDs) is 1 then
+                    set createdWindowID to item 1 of addedWindowIDs
+                    exit repeat
+                end if
+                delay 0.1
+            end repeat
+            if createdWindowID is missing value then error "Arc window creation did not expose a new window ID. A window may have opened; check Arc before retrying."
+            if (id of every window) does not contain createdWindowID then error "The newly created Arc task window closed before tab creation. Start a new task."
+            set operationPhase to "Reading tabs in the new Arc task window"
+            set previousTabIDs to id of every tab of window id createdWindowID
+            set operationPhase to "Creating the Arc task tab"
+            tell window id createdWindowID
+                make new tab with properties {URL:\(appleScriptLiteral(url))}
+            end tell
+            set createdTabID to missing value
+            set operationPhase to "Identifying the new Arc task tab"
+            repeat 20 times
+                if (id of every window) does not contain createdWindowID then error "The newly created Arc task window closed during tab creation. Start a new task."
+                set addedTabIDs to my addedIDs(previousTabIDs, id of every tab of window id createdWindowID)
+                if (count of addedTabIDs) > 1 then error "Arc tab creation was ambiguous: several new tabs appeared in the task window. Check Arc before retrying."
+                if (count of addedTabIDs) is 1 then
+                    set createdTabID to item 1 of addedTabIDs
+                    exit repeat
+                end if
+                delay 0.1
+            end repeat
+            if createdTabID is missing value then error "Arc tab creation did not expose a new tab ID in the task window. The window may be open; check Arc before retrying."
+        end tell
+        return my jsonResult({|ok|:true, |window_id|:createdWindowID, |tab_id|:createdTabID})
+        """
     }
 
     static func targetScript(windowID: String, tabID: String) -> String {
         """
         tell application id "company.thebrowser.Browser"
-            if not (exists window id \(appleScriptLiteral(windowID))) then error "The task window was closed. Start a new task."
-            set taskWindow to window id \(appleScriptLiteral(windowID))
-            tell taskWindow
-                if not (exists tab id \(appleScriptLiteral(tabID))) then error "The task tab was closed. Start a new task."
-                set taskTab to tab id \(appleScriptLiteral(tabID))
-            end tell
+            set operationPhase to "Checking the owned Arc window"
+            if (id of every window) does not contain \(appleScriptLiteral(windowID)) then error "The task window was closed. Start a new task."
+            set operationPhase to "Checking the owned Arc tab"
+            if (id of every tab of window id \(appleScriptLiteral(windowID))) does not contain \(appleScriptLiteral(tabID)) then error "The task tab was closed. Start a new task."
         end tell
         """
     }
 
-    private func evaluate(_ javascript: String) async throws -> JSONValue {
-        try await call(body: try targetScript() + """
+    static func navigationScript(windowID: String, tabID: String, url: String) -> String {
+        targetScript(windowID: windowID, tabID: tabID) + """
 
-            tell application id "company.thebrowser.Browser"
-                if loading of taskTab then return my jsonResult({|ok|:true, |loading|:true})
-                set pageResult to execute taskTab javascript \(Self.appleScriptLiteral(javascript))
-            end tell
-            if pageResult is missing value or pageResult is "" then error "No page result. Enable Arc → View → Developer → Allow JavaScript from Apple Events, then retry."
-            return pageResult
-            """)
+        set operationPhase to "Navigating the Arc task tab"
+        tell application id "company.thebrowser.Browser"
+            set URL of tab id \(appleScriptLiteral(tabID)) of window id \(appleScriptLiteral(windowID)) to \(appleScriptLiteral(url))
+        end tell
+        return my jsonResult({|ok|:true})
+        """
+    }
+
+    private func evaluate(_ javascript: String) async throws -> JSONValue {
+        let target = try targetIDs()
+        return try await call(body: Self.evaluationScript(windowID: target.windowID, tabID: target.tabID, javascript: javascript))
+    }
+
+    static func evaluationScript(windowID: String, tabID: String, javascript: String) -> String {
+        // Keep lexical specifiers in each command. Getting an Arc window/tab object
+        // first can return a malformed class-zero descriptor on current Arc builds.
+        targetScript(windowID: windowID, tabID: tabID) + """
+
+        tell application id "company.thebrowser.Browser"
+            set operationPhase to "Reading Arc tab loading status"
+            if loading of tab id \(appleScriptLiteral(tabID)) of window id \(appleScriptLiteral(windowID)) then return my jsonResult({|ok|:true, |loading|:true})
+            set operationPhase to "Reading or interacting with the Arc page"
+            set pageResult to execute tab id \(appleScriptLiteral(tabID)) of window id \(appleScriptLiteral(windowID)) javascript \(appleScriptLiteral(javascript))
+        end tell
+        if pageResult is missing value or pageResult is "" then error "No page result. Enable Arc → View → Developer → Allow JavaScript from Apple Events, then retry."
+        return pageResult
+        """
     }
 
     private func call(body: String) async throws -> JSONValue {
@@ -169,12 +219,23 @@ import LiteCUCore
             if jsonData is missing value then error "Unable to encode the Arc response."
             return (current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)) as text
         end jsonResult
+        on addedIDs(previousIDs, currentIDs)
+            set foundIDs to {}
+            repeat with candidate in currentIDs
+                set candidateID to contents of candidate
+                if candidateID is missing value or class of candidateID is not text or candidateID is "" then error "Arc returned an invalid object identifier. Check Arc before retrying."
+                if previousIDs does not contain candidateID and foundIDs does not contain candidateID then set end of foundIDs to candidateID
+            end repeat
+            return foundIDs
+        end addedIDs
         on run
+            set operationPhase to ""
             try
                 with timeout of 20 seconds
                     \(body)
                 end timeout
             on error messageText number errorCode
+                if operationPhase is not "" then set messageText to operationPhase & ": " & messageText
                 return my jsonResult({|ok|:false, |error|:messageText, |code|:errorCode})
             end try
         end run

@@ -1203,6 +1203,18 @@ private struct SettingsView: View {
                     .buttonStyle(PrimaryButtonStyle()).fixedSize()
                     .disabled(model.isRunning || model.isCheckingArc)
             }
+            Text("This live browser test opens example.com in a separate window, reads its title, and clicks Learn more to verify page controls. No model call is needed.")
+                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Test example.com (live)", action: model.testArcPage)
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.isRunning || model.isCheckingArc)
+                if model.isTestingArcPage {
+                    Button("Stop test", action: model.stopArcTest)
+                        .buttonStyle(.bordered)
+                }
+            }
         }
     }
 

@@ -142,6 +142,48 @@ public struct CodexClient: ModelClient {
             .replacingOccurrences(of: "\r", with: "\\r") + "\""
     }
 
+    /// CLI logs include the submitted prompt and startup configuration. Only a
+    /// recognized final diagnostic is suitable for the user-facing run result.
+    static func failureMessage(log: String, status: Int32, model: String?, submittedInput: String? = nil) -> String {
+        var diagnosticLog = log
+        if let submittedInput, !submittedInput.isEmpty {
+            diagnosticLog = diagnosticLog.replacingOccurrences(of: submittedInput, with: "")
+        }
+        diagnosticLog = diagnosticLog.replacingOccurrences(
+            of: "\u{001B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+        let lines = diagnosticLog.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let prefixes = ["error:", "fatal:"]
+        let diagnostic = lines.last { line in
+            prefixes.contains { line.lowercased().hasPrefix($0) }
+        }.map { line -> String in
+            var text = line
+            // Repeated wrappers such as "ERROR: Error: ..." add no information.
+            while let prefix = prefixes.first(where: { text.lowercased().hasPrefix($0) }) {
+                text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return text
+        }
+        guard let diagnostic, !diagnostic.isEmpty else {
+            if lines.contains(where: { $0.lowercased() == "not logged in" }) {
+                return "Codex is not signed in. Sign in with Codex and check the connection again."
+            }
+            return "Codex could not complete the request (status \(status)). Check the connection and selected model, then retry."
+        }
+        let lower = diagnostic.lowercased()
+        if lower.contains("at capacity") || lower.contains("overloaded") || lower.contains("insufficient capacity") {
+            let name: String
+            switch model {
+            case "gpt-6-sol": name = "GPT-6 Sol"
+            case "gpt-6.1-sol": name = "GPT-6.1 Sol"
+            default: name = "The selected model"
+            }
+            return "\(name) is at capacity. Try another model or retry shortly."
+        }
+        let message = "Codex: \(diagnostic)"
+        return message.count > 400 ? String(message.prefix(399)) + "…" : message
+    }
+
     private static func run(binaryPath: String, arguments: [String], directory: URL,
                             inputFile: URL? = nil, resultFile: URL? = nil) async throws -> String {
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
@@ -209,8 +251,11 @@ public struct CodexClient: ModelClient {
         defer { try? handle.close() }
         let log = String(decoding: try handle.read(upToCount: 4 * 1_024 * 1_024) ?? Data(), as: UTF8.self)
         guard process.terminationStatus == 0 else {
-            let diagnostic = String(log.suffix(2_000)).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw LiteCUError.message("Codex exited with status \(process.terminationStatus). \(diagnostic)")
+            let modelIndex = arguments.firstIndex(of: "--model").map { $0 + 1 }
+            let model = modelIndex.flatMap { arguments.indices.contains($0) ? arguments[$0] : nil }
+            let submittedInput = inputFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            throw LiteCUError.message(failureMessage(log: log, status: process.terminationStatus,
+                                                    model: model, submittedInput: submittedInput))
         }
         return log
     }
