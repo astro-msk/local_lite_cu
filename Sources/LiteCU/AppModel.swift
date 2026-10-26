@@ -7,8 +7,16 @@ final class AppModel: ObservableObject {
     @Published var command = ""
     @Published var modelName = "gpt-6.1-sol"
     @Published var backend = "Codex"
-    @Published var codexPath = CodexClient.discoverBinary() ?? ""
+    @Published var codexPath = CodexClient.discoverBinary() ?? "" {
+        didSet {
+            guard codexPath != oldValue else { return }
+            codexConnectionChecked = false
+            codexStatus = "Check this executable's Codex sign-in."
+        }
+    }
     @Published var codexStatus = "Uses your existing Codex sign-in"
+    @Published var isCheckingCodex = false
+    @Published var codexConnectionChecked = false
     @Published var demoMode = true
     @Published var confirmActions = true
     @Published var useSubagents = true
@@ -16,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published var apiKeyInput = ""
     @Published var keySaved = false
     @Published var isRunning = false
+    @Published var isStopping = false
     @Published var stage = "Ready"
     @Published var events: [RunEvent] = []
     @Published var plan = ""
@@ -30,15 +39,31 @@ final class AppModel: ObservableObject {
     let speech = SpeechController()
     private let desktop = MacDesktopDriver()
     private var task: Task<Void, Never>?
+    private var voiceStartTask: Task<Void, Never>?
+    private var voiceStartID: UUID?
     private var approval: CheckedContinuation<Bool, Never>?
     private var subscriptions = Set<AnyCancellable>()
+
+    var modelConnectionReady: Bool {
+        if backend == "Codex" { return codexConnectionChecked }
+        return keySaved || !(ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "").isEmpty
+    }
+
+    var modelConnectionSummary: String {
+        if backend == "Codex" {
+            if codexPath.isEmpty { return "Choose a Codex executable in Settings." }
+            if isCheckingCodex { return "Checking your Codex sign-in…" }
+            return codexConnectionChecked ? "Codex sign-in checked. Ready for a live task." : "Check your Codex sign-in in Settings before your first live task."
+        }
+        return modelConnectionReady ? "API key available. Ready for a live task." : "Add an OpenAI API key in Settings."
+    }
 
     init() {
         keySaved = KeychainStore.load() != nil
         refreshPermissions()
         speech.$transcript.dropFirst().sink { [weak self] text in
-            guard !text.isEmpty else { return }
-            self?.command = text
+            guard let self, !self.isRunning, !text.isEmpty else { return }
+            self.command = text
         }.store(in: &subscriptions)
         desktop.onEmergencyStop = { [weak self] in self?.stop() }
         desktop.startEmergencyStopMonitor()
@@ -48,8 +73,11 @@ final class AppModel: ObservableObject {
 
     func run() {
         guard !isRunning else { return }
+        guard voiceStartID == nil && !speech.isStarting && !speech.isListening && !speech.isFinishing else {
+            errorMessage = "Stop dictation and wait for the transcript before running your task."
+            return
+        }
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errorMessage = "Type a command or use the microphone."; return }
-        speech.stop()
         refreshPermissions()
         if !demoMode && (!accessibilityGranted || !screenRecordingGranted) {
             errorMessage = "Live desktop control needs Accessibility and Screen Recording. Enable them in Settings, then try again."
@@ -69,13 +97,16 @@ final class AppModel: ObservableObject {
         let runner = AgentRunner(driver: driver, client: client, configuration: config)
         events = [RunEvent("user", command)]
         plan = ""; result = ""; errorMessage = nil; pendingAction = nil; stepCount = 0
-        isRunning = true; stage = "Planning"
+        isRunning = true; isStopping = false; stage = "Planning"
         runner.onEvent = { [weak self] in self?.events.append($0) }
-        runner.onStage = { [weak self] in self?.stage = $0 }
+        runner.onStage = { [weak self] nextStage in
+            guard let self, !self.isStopping else { return }
+            self.stage = nextStage
+        }
         runner.onPlan = { [weak self] in self?.plan = $0 }
         runner.onStep = { [weak self] in self?.stepCount = $0 }
         runner.approve = { [weak self] action in
-            guard let self, !Task.isCancelled else { return false }
+            guard let self, !Task.isCancelled, !self.isStopping else { return false }
             return await withCheckedContinuation { continuation in
                 self.pendingAction = action
                 self.approval = continuation
@@ -87,7 +118,7 @@ final class AppModel: ObservableObject {
         task = Task { [weak self] in
             guard let self else { return }
             defer {
-                self.isRunning = false; self.pendingAction = nil; self.task = nil
+                self.isRunning = false; self.isStopping = false; self.pendingAction = nil; self.task = nil
                 NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
             }
             do {
@@ -95,8 +126,9 @@ final class AppModel: ObservableObject {
                     NSApp.hide(nil)
                     try await Task.sleep(for: .milliseconds(650))
                 }
-                self.result = try await runner.run(command: submittedCommand)
+                let completedResult = try await runner.run(command: submittedCommand)
                 try Task.checkCancellation()
+                self.result = completedResult
                 self.stage = "Complete"
             } catch is CancellationError {
                 self.stage = "Stopped"
@@ -113,7 +145,10 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
-        speech.stop()
+        voiceStartTask?.cancel()
+        voiceStartTask = nil; voiceStartID = nil
+        speech.abort()
+        if isRunning { isStopping = true; stage = "Stopping" }
         task?.cancel()
         let continuation = approval; approval = nil; pendingAction = nil
         continuation?.resume(returning: false)
@@ -127,9 +162,21 @@ final class AppModel: ObservableObject {
     }
     func reject() { stop() }
     func toggleVoice() {
-        guard !isRunning else { return }
+        guard !isRunning && voiceStartID == nil && !speech.isStarting && !speech.isFinishing else { return }
         if speech.isListening { speech.stop() }
-        else { Task { await speech.start() } }
+        else {
+            let startID = UUID()
+            voiceStartID = startID
+            voiceStartTask = Task { [weak self] in
+                guard let self, self.voiceStartID == startID, !self.isRunning, !Task.isCancelled else { return }
+                defer {
+                    if self.voiceStartID == startID {
+                        self.voiceStartTask = nil; self.voiceStartID = nil
+                    }
+                }
+                await self.speech.start()
+            }
+        }
     }
     func saveKey() {
         do {
@@ -154,11 +201,22 @@ final class AppModel: ObservableObject {
     func requestAccessibility() { MacDesktopDriver.requestAccessibilityPermission(); refreshPermissions() }
     func requestScreenRecording() { _ = MacDesktopDriver.requestScreenRecordingPermission(); refreshPermissions() }
     func checkCodex() {
+        guard !isCheckingCodex else { return }
+        isCheckingCodex = true
+        codexConnectionChecked = false
         codexStatus = "Checking Codex…"
         let path = codexPath
         Task {
-            do { codexStatus = try await CodexClient.connectionStatus(binaryPath: path) }
-            catch { codexStatus = error.localizedDescription }
+            defer { isCheckingCodex = false }
+            do {
+                let status = try await CodexClient.connectionStatus(binaryPath: path)
+                guard path == codexPath else { return }
+                codexStatus = status
+                codexConnectionChecked = true
+            } catch {
+                guard path == codexPath else { return }
+                codexStatus = error.localizedDescription
+            }
         }
     }
 }

@@ -26,6 +26,14 @@ Built with SwiftUI and Apple system frameworks. No Electron, Python runtime, ser
 
 This is an early testing prototype. Planning assistants run concurrently; a single executor controls the foreground desktop. It does not provide independent background desktops or browser workers.
 
+## Who owns the harness?
+
+**Lite CU owns the harness.** `AgentRunner` creates the parallel planning requests, coordinates the plan, validates proposed actions, requests approval, calls the native desktop driver, captures fresh observations, enforces limits, and stops work. Speech and all user-facing state also belong to the app.
+
+`ModelClient.generate(...)` is the replaceable model boundary. `OpenAIClient` calls the Responses API; `CodexClient` invokes a restricted Codex CLI process using its existing sign-in and returns the same text/JSON output to the app. Codex's desktop, browser, shell, MCP integrations, and native subagents are disabled in this adapter. It is still a CLI runtime bridge rather than a raw HTTP inference call; the app never delegates its desktop execution loop to Codex.
+
+The pipeline is defined in Swift, with [`AgentRunner.run(command:)`](Sources/LiteCUCore/AgentRunner.swift) as its entry point. The parallel planning requests and observe/action loop are both in that file. [`AppModel.run()`](Sources/LiteCU/AppModel.swift) selects the backend and connects approvals, cancellation, and progress to the UI. [`SpeechController`](Sources/LiteCU/SpeechController.swift) supplies the editable transcript, [`ActionPolicy`](Sources/LiteCUCore/ActionPolicy.swift) validates decisions, and [`MacDesktopDriver`](Sources/LiteCU/MacDesktopDriver.swift) observes and acts on the Mac.
+
 ## Run on your Mac
 
 Requires macOS 14+, a Swift 6 toolchain (Xcode or recent Command Line Tools), and a current Codex CLI for live model access.
@@ -38,13 +46,15 @@ cd local_lite_cu
 
 The script builds a release executable, creates and ad-hoc signs `dist/Lite CU.app`, and opens it. Run the `.app` bundle so macOS can associate permissions with Lite CU. `swift run LiteCU` alone is useful for development but is not the supported microphone/permission setup.
 
-1. Click **Try a simulated browser task** to test the complete workflow without network calls, permissions, or desktop effects. The demo is a fixed Safari-search rehearsal regardless of the command text.
+1. Click **Try demo** to test the complete workflow without network calls, permissions, or desktop effects. The demo is a fixed Safari-search rehearsal regardless of the command text.
 2. Open **Settings → Codex** and click **Check connection**. It should report that Codex is signed in with ChatGPT. This diagnostic does not make a model request.
 3. Enable **Accessibility** and **Screen Recording** for Lite CU in macOS System Settings. Restart the app if macOS requests it. Permissions may need to be re-enabled after rebuilding an ad-hoc signed app.
 4. Choose **Live**, enter a small task, and run. For example: “Open Safari and navigate to https://example.com.” Keep action approval enabled for the first experiments.
-5. For voice, click the microphone, speak, then stop dictation. Review the transcript before running. macOS will request Microphone and Speech Recognition access.
+5. For voice, click the microphone, wait for **Listening**, speak, then finish dictation. The input meter shows microphone activity. Wait for **Finishing transcript** to clear, review the text, and run. macOS will request Microphone and Speech Recognition access. If transcription fails, the app distinguishes missing audio, quiet input, and recognition failure and keeps any partial text.
 
 Lite CU hides its window during live control and brings it forward for approval and the result. Keep the target app on the main display and avoid using the mouse or keyboard during a live run. **⌘⇧Esc** stops from another app once Accessibility is granted; **⌘.** stops while Lite CU is active. Quitting also cancels active work.
+
+If macOS shows Accessibility enabled but Lite CU still reports it unavailable after a rebuild, remove only Lite CU from the Accessibility list and add the current `dist/Lite CU.app` again. This refreshes the stale development-build entry; do not reset permissions for other apps.
 
 ## Codex sign-in
 
@@ -59,6 +69,8 @@ The optional **OpenAI API** backend uses `POST /v1/responses` with structured ou
 ## What works
 
 - Typed commands and Apple speech recognition, with partial editable transcripts.
+- White default appearance, optional Dark/System themes, and a matching native app icon.
+- Consistent button colors: blue for running, green for voice, yellow for approval, and red for stopping.
 - GPT‑6.1 Sol and GPT‑6 Sol model selection.
 - Two concurrent read-only planning assistants and a coordinator.
 - A bounded observe/action/result loop, refreshing the screenshot after each action and after planning.
@@ -107,7 +119,10 @@ Sources/LiteCUCheck/  Demo and optional real Codex smoke checks
 Tests/               Deterministic orchestration and validation tests
 Resources/           App bundle metadata and permission descriptions
 scripts/             Build, launch, and verification scripts
+.cursor/agents/      Reusable native UI, interaction, and UX review specialists
 ```
+
+The checked-in app icon is built from the same cursor symbol as the interface. Regenerate it with `swift scripts/generate-icon.swift`. Theme selection persists between launches.
 
 ## Related projects and documentation
 
