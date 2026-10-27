@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lite-cu"
+version = "0.2.0"
+description = "A readable Python computer-use harness for macOS, powered by your Codex sign-in."
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6-Essentials>=6.8,<7",
+  "Pillow>=11,<13",
+  "pyobjc-framework-Cocoa>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-ScreenCaptureKit>=11,<13; sys_platform == 'darwin'",
+  "sounddevice>=0.5,<1",
+  "numpy>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "pyinstaller>=6.12,<7"]
+
+[project.scripts]
+litecu = "litecu.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["litecu*"]
+
+[tool.setuptools.package-data]
+litecu = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["Tests/python"]
+asyncio_mode = "auto"
